@@ -6,9 +6,9 @@
 ​I built this to run completely locally so it stays lightning-fast. The main feature right now is data reliability: you can close the app, turn off your phone, or reboot — all your notes and plans stay exactly where you left them.
 
 
-​### ✨ What's Inside:
+### ✨ What's Inside:
 ​Total Persistence: No data loss after restarts.
-​Confetti Effects: A little mood booster when you complete your tasks.
+​Confetti Effects: A little mood booster when you complete your tasks. 
 
 
 
