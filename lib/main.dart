@@ -15,12 +15,12 @@ void main() async {
 enum EventType { birthday, running, date, meeting }
 
 extension EventTypeX on EventType {
-  String get label {
+  String label(bool isRu) {
     switch (this) {
-      case EventType.birthday: return 'День рождения';
-      case EventType.running:  return 'Пробежка';
-      case EventType.date:     return 'Свидание';
-      case EventType.meeting:  return 'Встреча';
+      case EventType.birthday: return isRu ? 'День рождения' : 'Birthday';
+      case EventType.running:  return isRu ? 'Пробежка'     : 'Running';
+      case EventType.date:     return isRu ? 'Свидание'     : 'Date';
+      case EventType.meeting:  return isRu ? 'Встреча'      : 'Meeting';
     }
   }
   String get emoji {
@@ -51,6 +51,24 @@ class DayEvent {
       DayEvent(type: EventType.values[j['type'] as int], note: j['note'] as String);
 }
 
+//  LOCALIZATION
+const _monthNamesRu = [
+  'Январь','Февраль','Март','Апрель','Май','Июнь',
+  'Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь',
+];
+const _monthNamesEn = [
+  'January','February','March','April','May','June',
+  'July','August','September','October','November','December',
+];
+const _weekDaysRu = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
+const _weekDaysEn = ['Mo','Tu','We','Th','Fr','Sa','Su'];
+
+String _monthName(int month, bool isRu) =>
+    isRu ? _monthNamesRu[month - 1] : _monthNamesEn[month - 1];
+List<String> _weekDays(bool isRu) => isRu ? _weekDaysRu : _weekDaysEn;
+
+String _t(String ru, String en, bool isRu) => isRu ? ru : en;
+
 //  APP ROOT
 class CalendarApp extends StatefulWidget {
   final SharedPreferences prefs;
@@ -61,39 +79,46 @@ class CalendarApp extends StatefulWidget {
 
 class _CalendarAppState extends State<CalendarApp> {
   bool _isDark = false;
+  bool _isRu = true;
 
   @override
   void initState() {
     super.initState();
     _isDark = widget.prefs.getBool('isDark') ?? false;
+    _isRu   = widget.prefs.getBool('isRu') ?? true;
   }
 
-  void _toggle() {
+  void _toggleTheme() {
     setState(() => _isDark = !_isDark);
     widget.prefs.setBool('isDark', _isDark);
+  }
+
+  void _toggleLang() {
+    setState(() => _isRu = !_isRu);
+    widget.prefs.setBool('isRu', _isRu);
   }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Календарь',
+      title: 'Moolve Calendar',
       theme: ThemeData(
         brightness: _isDark ? Brightness.dark : Brightness.light,
         fontFamily: 'Georgia',
       ),
-      home: CalendarHome(isDark: _isDark, prefs: widget.prefs, onToggle: _toggle),
+      home: CalendarHome(
+        isDark: _isDark,
+        isRu: _isRu,
+        prefs: widget.prefs,
+        onToggleTheme: _toggleTheme,
+        onToggleLang: _toggleLang,
+      ),
     );
   }
 }
 
-//  CONSTANTS
-const _monthNames = [
-  'Январь','Февраль','Март','Апрель','Май','Июнь',
-  'Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь',
-];
-const _weekDays = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
-
+//  SCENE
 enum _Scene { newYear, spring, summer, autumn }
 _Scene _sceneFor(int m) {
   if (m == 12 || m == 1 || m == 2 || m == 11) return _Scene.newYear;
@@ -105,9 +130,18 @@ _Scene _sceneFor(int m) {
 //  HOME
 class CalendarHome extends StatefulWidget {
   final bool isDark;
+  final bool isRu;
   final SharedPreferences prefs;
-  final VoidCallback onToggle;
-  const CalendarHome({super.key, required this.isDark, required this.prefs, required this.onToggle});
+  final VoidCallback onToggleTheme;
+  final VoidCallback onToggleLang;
+  const CalendarHome({
+    super.key,
+    required this.isDark,
+    required this.isRu,
+    required this.prefs,
+    required this.onToggleTheme,
+    required this.onToggleLang,
+  });
   @override
   State<CalendarHome> createState() => _CalendarHomeState();
 }
@@ -157,6 +191,138 @@ class _CalendarHomeState extends State<CalendarHome> {
   List<DayEvent> _evFor(int m, int d) => _ev[_key(_year, m, d)] ?? [];
   bool _today(int m, int d) => _now.month == m && _now.day == d && _now.year == _year;
 
+  // ── Settings bottom sheet ─────────────────────
+  void _openSettings() {
+    final isDark = widget.isDark;
+    final isRu   = widget.isRu;
+    final bg  = isDark ? const Color(0xFF12123A) : Colors.white;
+    final txt = isDark ? Colors.white : const Color(0xFF1A3A5C);
+    final acc = isDark ? const Color(0xFF7C4DFF) : const Color(0xFF2196F3);
+    final sub = isDark ? Colors.white54 : const Color(0xFF1A3A5C).withOpacity(0.45);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Container(
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          boxShadow: [BoxShadow(color: acc.withOpacity(0.2), blurRadius: 28)],
+        ),
+        padding: const EdgeInsets.all(24),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          // Handle
+          Center(child: Container(
+            width: 40, height: 4,
+            margin: const EdgeInsets.only(bottom: 20),
+            decoration: BoxDecoration(color: sub, borderRadius: BorderRadius.circular(2)),
+          )),
+          Text(
+            _t('Настройки', 'Settings', isRu),
+            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: txt),
+          ),
+          const SizedBox(height: 24),
+
+          // Theme toggle row
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: acc.withOpacity(0.07),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: acc.withOpacity(0.2)),
+            ),
+            child: Row(children: [
+              Text(isDark ? '🌙' : '☀️', style: const TextStyle(fontSize: 22)),
+              const SizedBox(width: 12),
+              Expanded(child: Text(
+                _t(isDark ? 'Тёмная тема' : 'Светлая тема',
+                    isDark ? 'Dark theme'  : 'Light theme', isRu),
+                style: TextStyle(color: txt, fontSize: 15, fontWeight: FontWeight.w600),
+              )),
+              Switch(
+                value: isDark,
+                activeColor: acc,
+                onChanged: (_) {
+                  Navigator.pop(context);
+                  widget.onToggleTheme();
+                },
+              ),
+            ]),
+          ),
+          const SizedBox(height: 12),
+
+          // Language toggle row
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: acc.withOpacity(0.07),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: acc.withOpacity(0.2)),
+            ),
+            child: Row(children: [
+              const Text('🌍', style: TextStyle(fontSize: 22)),
+              const SizedBox(width: 12),
+              Expanded(child: Text(
+                _t('Язык', 'Language', isRu),
+                style: TextStyle(color: txt, fontSize: 15, fontWeight: FontWeight.w600),
+              )),
+              // RU / EN pill toggle
+              GestureDetector(
+                onTap: () {
+                  Navigator.pop(context);
+                  widget.onToggleLang();
+                },
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 300),
+                  width: 80, height: 34,
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(17),
+                    color: acc.withOpacity(0.15),
+                    border: Border.all(color: acc.withOpacity(0.4)),
+                  ),
+                  child: Stack(children: [
+                    AnimatedPositioned(
+                      duration: const Duration(milliseconds: 300),
+                      curve: Curves.easeInOut,
+                      left: isRu ? 2 : 42, top: 2,
+                      child: Container(
+                        width: 36, height: 30,
+                        decoration: BoxDecoration(
+                          color: acc,
+                          borderRadius: BorderRadius.circular(15),
+                        ),
+                        child: Center(child: Text(
+                          isRu ? 'RU' : 'EN',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        )),
+                      ),
+                    ),
+                    Positioned(
+                      left: isRu ? 44 : 6, top: 8,
+                      child: Text(
+                        isRu ? 'EN' : 'RU',
+                        style: TextStyle(
+                          color: txt.withOpacity(0.4),
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ]),
+                ),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 24),
+        ]),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Stack(children: [
@@ -164,16 +330,22 @@ class _CalendarHomeState extends State<CalendarHome> {
       Scaffold(
         backgroundColor: Colors.transparent,
         body: SafeArea(child: Column(children: [
-          _TopBar(isDark: widget.isDark, year: _year,
-              onToggle: widget.onToggle,
-              onYear: (y) => setState(() => _year = y)),
+          _TopBar(
+            isDark: widget.isDark,
+            isRu: widget.isRu,
+            year: _year,
+            onYear: (y) => setState(() => _year = y),
+            onSettings: _openSettings,
+          ),
           Expanded(child: ListView.builder(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             itemCount: 12,
             itemBuilder: (ctx, i) {
               final m = i + 1;
               return _MonthBlock(
-                month: m, year: _year, isDark: widget.isDark,
+                month: m, year: _year,
+                isDark: widget.isDark,
+                isRu: widget.isRu,
                 eventsFor: (d) => _evFor(m, d),
                 isToday: (d) => _today(m, d),
                 onTap: (d) => _showSheet(ctx, m, d),
@@ -183,7 +355,8 @@ class _CalendarHomeState extends State<CalendarHome> {
         ])),
       ),
       if (_confetti)
-        Positioned.fill(child: _ConfettiLayer(onDismiss: () => setState(() => _confetti = false))),
+        Positioned.fill(child: _ConfettiLayer(
+            onDismiss: () => setState(() => _confetti = false))),
     ]);
   }
 
@@ -194,7 +367,9 @@ class _CalendarHomeState extends State<CalendarHome> {
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
       builder: (_) => _Sheet(
-        month: m, day: d, year: _year, isDark: widget.isDark,
+        month: m, day: d, year: _year,
+        isDark: widget.isDark,
+        isRu: widget.isRu,
         current: List.from(_ev[k] ?? []),
         onSave: (list) {
           setState(() { list.isEmpty ? _ev.remove(k) : _ev[k] = list; });
@@ -208,11 +383,21 @@ class _CalendarHomeState extends State<CalendarHome> {
   }
 }
 
-//  TOP BAR
+//  TOP BAR  — тема убрана, добавлена шестерёнка
 class _TopBar extends StatelessWidget {
-  final bool isDark; final int year;
-  final VoidCallback onToggle; final ValueChanged<int> onYear;
-  const _TopBar({required this.isDark, required this.year, required this.onToggle, required this.onYear});
+  final bool isDark;
+  final bool isRu;
+  final int year;
+  final ValueChanged<int> onYear;
+  final VoidCallback onSettings;
+
+  const _TopBar({
+    required this.isDark,
+    required this.isRu,
+    required this.year,
+    required this.onYear,
+    required this.onSettings,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -221,39 +406,28 @@ class _TopBar extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
       child: Row(children: [
-        _Btn(icon: Icons.chevron_left_rounded, color: acc, onTap: () => onYear(year - 1)),
+        _Btn(icon: Icons.chevron_left_rounded, color: acc,
+            onTap: () => onYear(year - 1)),
         const SizedBox(width: 8),
-        Text('$year', style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold,
+        Text('$year', style: TextStyle(
+            fontSize: 28, fontWeight: FontWeight.bold,
             color: txt, letterSpacing: 2)),
         const SizedBox(width: 8),
-        _Btn(icon: Icons.chevron_right_rounded, color: acc, onTap: () => onYear(year + 1)),
+        _Btn(icon: Icons.chevron_right_rounded, color: acc,
+            onTap: () => onYear(year + 1)),
         const Spacer(),
+        // ⚙️ Settings button
         GestureDetector(
-          onTap: onToggle,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 380),
-            curve: Curves.easeInOut,
-            width: 64, height: 32,
+          onTap: onSettings,
+          child: Container(
+            width: 42, height: 42,
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              gradient: LinearGradient(colors: isDark
-                  ? [const Color(0xFF1A1A4E), const Color(0xFF4A0072)]
-                  : [const Color(0xFF64B5F6), const Color(0xFF42A5F5)]),
-              boxShadow: [BoxShadow(color: acc.withOpacity(0.45), blurRadius: 8)],
+              shape: BoxShape.circle,
+              color: acc.withOpacity(0.15),
+              border: Border.all(color: acc.withOpacity(0.4)),
+              boxShadow: [BoxShadow(color: acc.withOpacity(0.3), blurRadius: 8)],
             ),
-            child: Stack(children: [
-              AnimatedPositioned(
-                duration: const Duration(milliseconds: 380), curve: Curves.easeInOut,
-                left: isDark ? 34 : 2, top: 2,
-                child: Container(
-                  width: 28, height: 28,
-                  decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.white,
-                      boxShadow: [BoxShadow(color: Colors.black26, blurRadius: 4)]),
-                  child: Center(child: Text(isDark ? '🌙' : '☀️',
-                      style: const TextStyle(fontSize: 14))),
-                ),
-              ),
-            ]),
+            child: Icon(Icons.settings_rounded, color: acc, size: 22),
           ),
         ),
       ]),
@@ -270,7 +444,8 @@ class _Btn extends StatelessWidget {
     child: Container(
       width: 32, height: 32,
       decoration: BoxDecoration(shape: BoxShape.circle,
-          color: color.withOpacity(0.15), border: Border.all(color: color.withOpacity(0.4))),
+          color: color.withOpacity(0.15),
+          border: Border.all(color: color.withOpacity(0.4))),
       child: Icon(icon, color: color, size: 18),
     ),
   );
@@ -278,11 +453,12 @@ class _Btn extends StatelessWidget {
 
 //  MONTH BLOCK
 class _MonthBlock extends StatelessWidget {
-  final int month, year; final bool isDark;
+  final int month, year; final bool isDark, isRu;
   final List<DayEvent> Function(int) eventsFor;
   final bool Function(int) isToday;
   final void Function(int) onTap;
-  const _MonthBlock({required this.month, required this.year, required this.isDark,
+  const _MonthBlock({required this.month, required this.year,
+    required this.isDark, required this.isRu,
     required this.eventsFor, required this.isToday, required this.onTap});
 
   int get _days => DateUtils.getDaysInMonth(year, month);
@@ -292,6 +468,7 @@ class _MonthBlock extends StatelessWidget {
   Widget build(BuildContext context) {
     final rows = ((_startWd + _days) / 7).ceil();
     final acc = isDark ? const Color(0xFF7C4DFF) : const Color(0xFF2196F3);
+    final wd = _weekDays(isRu);
     return Container(
       margin: const EdgeInsets.only(bottom: 16),
       decoration: BoxDecoration(
@@ -299,18 +476,17 @@ class _MonthBlock extends StatelessWidget {
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: isDark
             ? Colors.white.withOpacity(0.1) : const Color(0xFF90CAF9).withOpacity(0.4)),
-        boxShadow: [BoxShadow(
-            color: acc.withOpacity(0.08), blurRadius: 20, spreadRadius: 2)],
+        boxShadow: [BoxShadow(color: acc.withOpacity(0.08), blurRadius: 20, spreadRadius: 2)],
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(20),
         child: Column(children: [
-          _Header(month: month, isDark: isDark, scene: _sceneFor(month)),
+          _Header(month: month, isDark: isDark, isRu: isRu, scene: _sceneFor(month)),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
             child: Row(children: List.generate(7, (i) {
               final isSat = i == 5; final isSun = i == 6;
-              return Expanded(child: Center(child: Text(_weekDays[i],
+              return Expanded(child: Center(child: Text(wd[i],
                   style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold,
                     color: isSun ? const Color(0xFFFF5252)
                         : isSat ? acc
@@ -339,10 +515,11 @@ class _MonthBlock extends StatelessWidget {
   }
 }
 
-//  MONTH HEADER + ILLUSTRATION
+//  MONTH HEADER
 class _Header extends StatelessWidget {
-  final int month; final bool isDark; final _Scene scene;
-  const _Header({required this.month, required this.isDark, required this.scene});
+  final int month; final bool isDark, isRu; final _Scene scene;
+  const _Header({required this.month, required this.isDark,
+    required this.isRu, required this.scene});
 
   List<Color> _grad() {
     if (isDark) return [const Color(0xFF7C4DFF).withOpacity(0.7), const Color(0xFF40C4FF).withOpacity(0.5)];
@@ -361,15 +538,17 @@ class _Header extends StatelessWidget {
         colors: _grad(), begin: Alignment.topLeft, end: Alignment.bottomRight)),
     child: Stack(children: [
       Positioned.fill(child: CustomPaint(painter: _IlluPainter(scene: scene, isDark: isDark))),
-      Positioned(left: 16, bottom: 12, child: Text(_monthNames[month - 1],
-          style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold,
-              color: Colors.white,
-              shadows: [Shadow(color: Colors.black45, blurRadius: 6)]))),
+      Positioned(left: 16, bottom: 12, child: Text(
+        _monthName(month, isRu),
+        style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold,
+            color: Colors.white,
+            shadows: [Shadow(color: Colors.black45, blurRadius: 6)]),
+      )),
     ]),
   );
 }
 
-//  ILLUSTRATION PAINTER
+//  ILLUSTRATION PAINTER — без изменений
 class _IlluPainter extends CustomPainter {
   final _Scene scene; final bool isDark;
   const _IlluPainter({required this.scene, required this.isDark});
@@ -423,19 +602,15 @@ class _IlluPainter extends CustomPainter {
   }
 
   void _newYear(Canvas c, Size s) {
-    // snow ground
     c.drawRRect(RRect.fromRectAndCorners(
         Rect.fromLTWH(0, s.height*0.72, s.width, s.height),
         topLeft: const Radius.circular(28), topRight: const Radius.circular(28)),
         _p(Colors.white.withOpacity(0.22)));
-    // trees
     _fir(c, s.width*0.7, s.height*0.73, 40);
     _fir(c, s.width*0.82, s.height*0.7, 28);
     _fir(c, s.width*0.58, s.height*0.75, 24);
-    // moon
     c.drawCircle(Offset(s.width*0.15, s.height*0.22), 15, _p(Colors.white.withOpacity(0.9)));
     c.drawCircle(Offset(s.width*0.19, s.height*0.19), 12, _p(const Color(0xFF1565C0)));
-    // snowflakes
     final rnd = Random(7);
     for (int i = 0; i < 22; i++) {
       c.drawCircle(Offset(rnd.nextDouble()*s.width, rnd.nextDouble()*s.height*0.65),
@@ -468,12 +643,10 @@ class _IlluPainter extends CustomPainter {
   }
 
   void _summer(Canvas c, Size s) {
-    // sea
     c.drawRRect(RRect.fromRectAndCorners(
         Rect.fromLTWH(0, s.height*0.58, s.width, s.height),
         topLeft: const Radius.circular(22), topRight: const Radius.circular(22)),
         _p(Colors.white.withOpacity(0.22)));
-    // waves
     for (int w = 0; w < 3; w++) {
       final wy = s.height*(0.63 + w*0.07);
       final path = Path()..moveTo(0, wy);
@@ -483,7 +656,6 @@ class _IlluPainter extends CustomPainter {
       c.drawPath(path, Paint()..style = PaintingStyle.stroke
         ..strokeWidth = 1.8..color = Colors.white.withOpacity(0.4));
     }
-    // sand
     c.drawRRect(RRect.fromRectAndCorners(
         Rect.fromLTWH(0, s.height*0.72, s.width, s.height),
         topLeft: const Radius.circular(10), topRight: const Radius.circular(10)),
@@ -491,7 +663,6 @@ class _IlluPainter extends CustomPainter {
     _sun(c, s.width*0.76, s.height*0.18, 20);
     _cloud(c, s.width*0.14, s.height*0.14, 0.8);
     _cloud(c, s.width*0.45, s.height*0.09, 1.0);
-    // beach umbrella
     c.drawArc(Rect.fromCenter(center: Offset(s.width*0.22, s.height*0.71),
         width: 54, height: 34), pi, pi, true, _p(Colors.red.withOpacity(0.5)));
     c.drawArc(Rect.fromCenter(center: Offset(s.width*0.22, s.height*0.71),
@@ -505,17 +676,14 @@ class _IlluPainter extends CustomPainter {
         Rect.fromLTWH(0, s.height*0.75, s.width, s.height),
         topLeft: const Radius.circular(28), topRight: const Radius.circular(28)),
         _p(Colors.white.withOpacity(0.18)));
-    // tree
     final trunk = Paint()..style = PaintingStyle.stroke
       ..strokeWidth = 5..color = Colors.white.withOpacity(0.4)..strokeCap = StrokeCap.round;
     c.drawLine(Offset(s.width*0.68, s.height*0.75), Offset(s.width*0.68, s.height*0.33), trunk);
     c.drawLine(Offset(s.width*0.68, s.height*0.5), Offset(s.width*0.57, s.height*0.39), trunk);
     c.drawLine(Offset(s.width*0.68, s.height*0.44), Offset(s.width*0.79, s.height*0.37), trunk);
-    // foliage
     c.drawCircle(Offset(s.width*0.68, s.height*0.26), 27, _p(Colors.orange.withOpacity(0.45)));
     c.drawCircle(Offset(s.width*0.59, s.height*0.30), 18, _p(Colors.deepOrange.withOpacity(0.38)));
     c.drawCircle(Offset(s.width*0.77, s.height*0.29), 17, _p(Colors.yellow.withOpacity(0.4)));
-    // falling leaves
     final rnd = Random(13);
     final lc = [Colors.orange, Colors.deepOrange, Colors.yellow, Colors.red];
     for (int i = 0; i < 14; i++) {
@@ -526,7 +694,6 @@ class _IlluPainter extends CustomPainter {
           _p(lc[rnd.nextInt(lc.length)].withOpacity(0.55)));
       c.restore();
     }
-    // pale sun
     c.drawCircle(Offset(s.width*0.15, s.height*0.2), 14, _p(Colors.yellow.withOpacity(0.5)));
   }
 
@@ -584,11 +751,12 @@ class _Cell extends StatelessWidget {
 
 //  EVENT SHEET
 class _Sheet extends StatefulWidget {
-  final int month, day, year; final bool isDark;
+  final int month, day, year; final bool isDark, isRu;
   final List<DayEvent> current;
   final void Function(List<DayEvent>) onSave;
   const _Sheet({required this.month, required this.day, required this.year,
-    required this.isDark, required this.current, required this.onSave});
+    required this.isDark, required this.isRu,
+    required this.current, required this.onSave});
   @override
   State<_Sheet> createState() => _SheetState();
 }
@@ -612,7 +780,8 @@ class _SheetState extends State<_Sheet> {
 
   @override
   Widget build(BuildContext context) {
-    final bg = widget.isDark ? const Color(0xFF12123A) : Colors.white;
+    final isRu = widget.isRu;
+    final bg  = widget.isDark ? const Color(0xFF12123A) : Colors.white;
     final txt = widget.isDark ? Colors.white : const Color(0xFF1A3A5C);
     final acc = widget.isDark ? const Color(0xFF7C4DFF) : const Color(0xFF2196F3);
     final sub = widget.isDark ? Colors.white54 : const Color(0xFF1A3A5C).withOpacity(0.45);
@@ -630,21 +799,23 @@ class _SheetState extends State<_Sheet> {
                 Center(child: Container(width: 40, height: 4,
                     margin: const EdgeInsets.only(bottom: 16),
                     decoration: BoxDecoration(color: sub, borderRadius: BorderRadius.circular(2)))),
-                Text('${_monthNames[widget.month-1]}, ${widget.day}',
+                Text('${_monthName(widget.month, isRu)}, ${widget.day}',
                     style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: txt)),
                 const SizedBox(height: 3),
                 Text('${widget.year}', style: TextStyle(color: sub, fontSize: 13)),
                 const SizedBox(height: 20),
 
                 if (_list.isNotEmpty) ...[
-                  Text('События', style: TextStyle(color: sub, fontSize: 12, fontWeight: FontWeight.bold)),
+                  Text(_t('События', 'Events', isRu),
+                      style: TextStyle(color: sub, fontSize: 12, fontWeight: FontWeight.bold)),
                   const SizedBox(height: 8),
-                  ..._list.map((e) => _EvTile(ev: e, isDark: widget.isDark,
+                  ..._list.map((e) => _EvTile(ev: e, isDark: widget.isDark, isRu: isRu,
                       onDel: () => setState(() => _list.removeWhere((x) => x.type == e.type)))),
                   const SizedBox(height: 16),
                 ],
 
-                Text('Добавить', style: TextStyle(color: sub, fontSize: 12, fontWeight: FontWeight.bold)),
+                Text(_t('Добавить', 'Add', isRu),
+                    style: TextStyle(color: sub, fontSize: 12, fontWeight: FontWeight.bold)),
                 const SizedBox(height: 10),
                 Wrap(spacing: 8, runSpacing: 8, children: EventType.values.map((t) {
                   final sel = _pick == t;
@@ -665,7 +836,8 @@ class _SheetState extends State<_Sheet> {
                       child: Row(mainAxisSize: MainAxisSize.min, children: [
                         Text(t.emoji, style: const TextStyle(fontSize: 14)),
                         const SizedBox(width: 6),
-                        Text(t.label, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600,
+                        Text(t.label(isRu), style: TextStyle(fontSize: 13,
+                            fontWeight: FontWeight.w600,
                             color: sel ? Colors.white : has ? Colors.grey : txt)),
                       ]),
                     ),
@@ -676,9 +848,11 @@ class _SheetState extends State<_Sheet> {
                   const SizedBox(height: 14),
                   TextField(controller: _ctrl, autofocus: true, style: TextStyle(color: txt),
                       decoration: InputDecoration(
-                        hintText: 'Заметка (необязательно)', hintStyle: TextStyle(color: sub),
+                        hintText: _t('Заметка (необязательно)', 'Note (optional)', isRu),
+                        hintStyle: TextStyle(color: sub),
                         filled: true, fillColor: acc.withOpacity(0.07),
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
+                            borderSide: BorderSide.none),
                         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
                             borderSide: BorderSide(color: acc, width: 1.5)),
                       )),
@@ -689,8 +863,10 @@ class _SheetState extends State<_Sheet> {
                         foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         padding: const EdgeInsets.symmetric(vertical: 14)),
-                    child: Text('Добавить ${_pick!.emoji}',
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                    child: Text(
+                      '${_t('Добавить', 'Add', isRu)} ${_pick!.emoji}',
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                    ),
                   )),
                 ],
                 const SizedBox(height: 20),
@@ -701,7 +877,7 @@ class _SheetState extends State<_Sheet> {
                         side: BorderSide(color: sub.withOpacity(0.4)),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         padding: const EdgeInsets.symmetric(vertical: 14)),
-                    child: const Text('Закрыть'),
+                    child: Text(_t('Закрыть', 'Close', isRu)),
                   )),
                   const SizedBox(width: 12),
                   Expanded(flex: 2, child: ElevatedButton(
@@ -710,8 +886,8 @@ class _SheetState extends State<_Sheet> {
                         foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                         padding: const EdgeInsets.symmetric(vertical: 14), elevation: 4),
-                    child: const Text('Сохранить ✓',
-                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+                    child: Text(_t('Сохранить ✓', 'Save ✓', isRu),
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
                   )),
                 ]),
               ]),
@@ -722,8 +898,9 @@ class _SheetState extends State<_Sheet> {
 }
 
 class _EvTile extends StatelessWidget {
-  final DayEvent ev; final bool isDark; final VoidCallback onDel;
-  const _EvTile({required this.ev, required this.isDark, required this.onDel});
+  final DayEvent ev; final bool isDark, isRu; final VoidCallback onDel;
+  const _EvTile({required this.ev, required this.isDark,
+    required this.isRu, required this.onDel});
   @override
   Widget build(BuildContext context) {
     final txt = isDark ? Colors.white : const Color(0xFF1A3A5C);
@@ -737,12 +914,14 @@ class _EvTile extends StatelessWidget {
         Text(ev.type.emoji, style: const TextStyle(fontSize: 18)),
         const SizedBox(width: 10),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(ev.type.label, style: TextStyle(color: txt, fontWeight: FontWeight.bold, fontSize: 13)),
+          Text(ev.type.label(isRu),
+              style: TextStyle(color: txt, fontWeight: FontWeight.bold, fontSize: 13)),
           if (ev.note.isNotEmpty)
             Text(ev.note, style: TextStyle(color: txt.withOpacity(0.6), fontSize: 12)),
         ])),
         GestureDetector(onTap: onDel,
-            child: Icon(Icons.delete_outline_rounded, color: Colors.red.withOpacity(0.6), size: 20)),
+            child: Icon(Icons.delete_outline_rounded,
+                color: Colors.red.withOpacity(0.6), size: 20)),
       ]),
     );
   }
@@ -798,21 +977,19 @@ class _SkyPainter extends CustomPainter {
 
   @override
   void paint(Canvas c, Size s) {
-    // Sun glow
     c.drawCircle(Offset(s.width*0.8, s.height*0.07), 55,
         Paint()..style = PaintingStyle.fill
           ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 35)
           ..color = Colors.yellow.withOpacity(0.25));
-    // Sun
-    c.drawCircle(Offset(s.width*0.8, s.height*0.07), 24, Paint()..color = Colors.yellow.withOpacity(0.9));
-    // Rays
-    final rays = Paint()..style = PaintingStyle.stroke..strokeWidth = 2.2..color = Colors.yellow.withOpacity(0.4);
+    c.drawCircle(Offset(s.width*0.8, s.height*0.07), 24,
+        Paint()..color = Colors.yellow.withOpacity(0.9));
+    final rays = Paint()..style = PaintingStyle.stroke
+      ..strokeWidth = 2.2..color = Colors.yellow.withOpacity(0.4);
     for (int i = 0; i < 8; i++) {
       final a = i*pi/4 + t*0.4;
       c.drawLine(Offset(s.width*0.8+cos(a)*28, s.height*0.07+sin(a)*28),
           Offset(s.width*0.8+cos(a)*40, s.height*0.07+sin(a)*40), rays);
     }
-    // Drifting clouds
     _cloud(c, s.width*(0.1 + t*0.06), s.height*0.15, 0.9);
     _cloud(c, s.width*(0.55 - t*0.05), s.height*0.09, 1.1);
     _cloud(c, s.width*(0.28 + t*0.04), s.height*0.24, 0.7);
@@ -861,7 +1038,10 @@ class _NightBgState extends State<_NightBg> with SingleTickerProviderStateMixin 
   );
 }
 
-class _Star { final double x,y,r,phase; const _Star({required this.x,required this.y,required this.r,required this.phase}); }
+class _Star {
+  final double x,y,r,phase;
+  const _Star({required this.x, required this.y, required this.r, required this.phase});
+}
 
 class _StarPainter extends CustomPainter {
   final List<_Star> stars; final double t;
@@ -877,9 +1057,12 @@ class _StarPainter extends CustomPainter {
     c.drawCircle(Offset(s.width*0.82, s.height*0.07), 60,
         Paint()..maskFilter=const MaskFilter.blur(BlurStyle.normal,30)
           ..color=const Color(0xFF7C4DFF).withOpacity(0.15));
-    c.drawCircle(Offset(s.width*0.82, s.height*0.07), 22, Paint()..color=const Color(0xFFEEEAFF));
-    c.drawCircle(Offset(s.width*0.87, s.height*0.065), 17, Paint()..color=const Color(0xFF1A1040));
-    c.drawLine(Offset(s.width*0.3+t*40, s.height*0.12), Offset(s.width*0.3+t*40+55, s.height*0.12+14),
+    c.drawCircle(Offset(s.width*0.82, s.height*0.07), 22,
+        Paint()..color=const Color(0xFFEEEAFF));
+    c.drawCircle(Offset(s.width*0.87, s.height*0.065), 17,
+        Paint()..color=const Color(0xFF1A1040));
+    c.drawLine(Offset(s.width*0.3+t*40, s.height*0.12),
+        Offset(s.width*0.3+t*40+55, s.height*0.12+14),
         Paint()..style=PaintingStyle.stroke..strokeWidth=1.5..strokeCap=StrokeCap.round
           ..color=Colors.white.withOpacity(t*0.5));
   }
@@ -887,7 +1070,7 @@ class _StarPainter extends CustomPainter {
   bool shouldRepaint(_StarPainter o) => o.t != t;
 }
 
-//  CONFETTI LAYER (only falling pieces)
+//  CONFETTI LAYER
 class _ConfettiLayer extends StatefulWidget {
   final VoidCallback onDismiss;
   const _ConfettiLayer({required this.onDismiss});
