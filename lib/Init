@@ -1,0 +1,14 @@
+  @override
+  void initState() {
+    super.initState();
+    // 1. Запускаем загрузку данных из памяти
+    _st.load().then((_) {
+      // 2. Ждем, когда Flutter закончит текущий билд
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        // 3. Только теперь говорим, что данные готовы и можно показать календарь
+        if (mounted) {
+          setState(() => _ready = true);
+        }
+      });
+    });
+  }
