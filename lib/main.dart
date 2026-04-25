@@ -1,1149 +1,1272 @@
-import 'dart:math';
-import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-  final prefs = await SharedPreferences.getInstance();
-  runApp(CalendarApp(prefs: prefs));
+  runApp(const CalendarApp());
 }
 
-//  EVENT MODEL
-enum EventType { birthday, running, date, meeting }
+// ─── Event Types ─────────────────────────────────────────────────────────────
 
-extension EventTypeX on EventType {
-  String label(bool isRu) {
-    switch (this) {
-      case EventType.birthday: return isRu ? 'День рождения' : 'Birthday';
-      case EventType.running:  return isRu ? 'Пробежка'     : 'Running';
-      case EventType.date:     return isRu ? 'Свидание'     : 'Date';
-      case EventType.meeting:  return isRu ? 'Встреча'      : 'Meeting';
-    }
+enum EventType { trip, meeting, run, birthday, date, school, other }
+
+extension EventTypeExt on EventType {
+  String label(bool ru) {
+    const ruMap = {
+      EventType.trip: 'Поездка', EventType.meeting: 'Встреча',
+      EventType.run: 'Пробежка', EventType.birthday: 'День рождения',
+      EventType.date: 'Свидание', EventType.school: 'Школа',
+      EventType.other: 'Другое',
+    };
+    const enMap = {
+      EventType.trip: 'Trip', EventType.meeting: 'Meeting',
+      EventType.run: 'Run', EventType.birthday: 'Birthday',
+      EventType.date: 'Date', EventType.school: 'School',
+      EventType.other: 'Other',
+    };
+    return (ru ? ruMap : enMap)[this]!;
   }
-  String get emoji {
-    switch (this) {
-      case EventType.birthday: return '🎂';
-      case EventType.running:  return '🏃';
-      case EventType.date:     return '❤️';
-      case EventType.meeting:  return '📋';
-    }
-  }
-  Color get color {
-    switch (this) {
-      case EventType.birthday: return const Color(0xFFFF4081);
-      case EventType.running:  return const Color(0xFF00C853);
-      case EventType.date:     return const Color(0xFFE91E63);
-      case EventType.meeting:  return const Color(0xFF2196F3);
-    }
-  }
+
+  String get emoji => const {
+    EventType.trip: '✈️', EventType.meeting: '🤝', EventType.run: '🏃',
+    EventType.birthday: '🎂', EventType.date: '❤️', EventType.school: '🎓',
+    EventType.other: '📌',
+  }[this]!;
+
+  Color get color => const {
+    EventType.trip: Color(0xFF5A8FDB), EventType.meeting: Color(0xFF70B8A0),
+    EventType.run: Color(0xFFE07B5F), EventType.birthday: Color(0xFFD4A0D0),
+    EventType.date: Color(0xFFE87070), EventType.school: Color(0xFFE8C160),
+    EventType.other: Color(0xFF9E9E9E),
+  }[this]!;
 }
 
-class DayEvent {
+// ─── Event Model ─────────────────────────────────────────────────────────────
+
+class CalendarEvent {
+  final String id;
   final EventType type;
   final String note;
-  DayEvent({required this.type, required this.note});
+  final String time; // "HH:mm" or ""
 
-  Map<String, dynamic> toJson() => {'type': type.index, 'note': note};
-  factory DayEvent.fromJson(Map<String, dynamic> j) =>
-      DayEvent(type: EventType.values[j['type'] as int], note: j['note'] as String);
+  const CalendarEvent({
+    required this.id,
+    required this.type,
+    this.note = '',
+    this.time = '',
+  });
+
+  Map<String, dynamic> toJson() =>
+      {'id': id, 'type': type.name, 'note': note, 'time': time};
+
+  factory CalendarEvent.fromJson(Map<String, dynamic> j) => CalendarEvent(
+    id: j['id'] as String,
+    type: EventType.values.firstWhere((e) => e.name == j['type'],
+        orElse: () => EventType.other),
+    note: j['note'] as String? ?? '',
+    time: j['time'] as String? ?? '',
+  );
+
+  CalendarEvent copyWith({String? note, String? time}) => CalendarEvent(
+      id: id, type: type, note: note ?? this.note, time: time ?? this.time);
 }
 
-//  LOCALIZATION
-const _monthNamesRu = [
-  'Январь','Февраль','Март','Апрель','Май','Июнь',
-  'Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь',
-];
-const _monthNamesEn = [
-  'January','February','March','April','May','June',
-  'July','August','September','October','November','December',
-];
-const _weekDaysRu = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
-const _weekDaysEn = ['Mo','Tu','We','Th','Fr','Sa','Su'];
+// ─── App State ───────────────────────────────────────────────────────────────
 
-String _monthName(int month, bool isRu) =>
-    isRu ? _monthNamesRu[month - 1] : _monthNamesEn[month - 1];
-List<String> _weekDays(bool isRu) => isRu ? _weekDaysRu : _weekDaysEn;
+class AppState extends ChangeNotifier {
+  bool _isDark = false;
+  bool _isRu = true;
+  final Map<String, List<CalendarEvent>> _events = {};
 
-String _t(String ru, String en, bool isRu) => isRu ? ru : en;
+  bool get isDark => _isDark;
+  bool get isRu => _isRu;
 
-//  APP ROOT
+  Future<void> load() async {
+    final p = await SharedPreferences.getInstance();
+    _isDark = p.getBool('isDark') ?? false;
+    _isRu = p.getBool('isRu') ?? true;
+    final raw = p.getString('events_v2');
+    if (raw != null) {
+      final dec = jsonDecode(raw) as Map<String, dynamic>;
+      dec.forEach((k, v) {
+        _events[k] = (v as List)
+            .map((e) => CalendarEvent.fromJson(e as Map<String, dynamic>))
+            .toList();
+      });
+    }
+    notifyListeners();
+  }
+
+  Future<void> _persist() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(
+        'events_v2',
+        jsonEncode(
+            _events.map((k, v) => MapEntry(k, v.map((e) => e.toJson()).toList()))));
+  }
+
+  Future<void> toggleTheme() async {
+    _isDark = !_isDark;
+    (await SharedPreferences.getInstance()).setBool('isDark', _isDark);
+    notifyListeners();
+  }
+
+  Future<void> toggleLanguage() async {
+    _isRu = !_isRu;
+    (await SharedPreferences.getInstance()).setBool('isRu', _isRu);
+    notifyListeners();
+  }
+
+  List<CalendarEvent> getEvents(String key) => _events[key] ?? [];
+  bool hasEvents(String key) => (_events[key]?.isNotEmpty) ?? false;
+
+  Future<void> addEvent(String key, CalendarEvent ev) async {
+    if ((_events[key]?.length ?? 0) >= 3) return;
+    _events[key] = [...(_events[key] ?? []), ev];
+    await _persist();
+    notifyListeners();
+  }
+
+  Future<void> updateEvent(String key, CalendarEvent ev) async {
+    final list = _events[key];
+    if (list == null) return;
+    final i = list.indexWhere((e) => e.id == ev.id);
+    if (i != -1) list[i] = ev;
+    await _persist();
+    notifyListeners();
+  }
+
+  Future<void> deleteEvent(String key, String id) async {
+    _events[key]?.removeWhere((e) => e.id == id);
+    if (_events[key]?.isEmpty ?? false) _events.remove(key);
+    await _persist();
+    notifyListeners();
+  }
+}
+
+// ─── Root ────────────────────────────────────────────────────────────────────
+
 class CalendarApp extends StatefulWidget {
-  final SharedPreferences prefs;
-  const CalendarApp({super.key, required this.prefs});
+  const CalendarApp({super.key});
   @override
   State<CalendarApp> createState() => _CalendarAppState();
 }
 
 class _CalendarAppState extends State<CalendarApp> {
-  bool _isDark = false;
-  bool _isRu = true;
+  final AppState _st = AppState();
+  bool _ready = false;
 
   @override
   void initState() {
     super.initState();
-    _isDark = widget.prefs.getBool('isDark') ?? false;
-    _isRu   = widget.prefs.getBool('isRu') ?? true;
-  }
-
-  void _toggleTheme() {
-    setState(() => _isDark = !_isDark);
-    widget.prefs.setBool('isDark', _isDark);
-  }
-
-  void _toggleLang() {
-    setState(() => _isRu = !_isRu);
-    widget.prefs.setBool('isRu', _isRu);
+    _st.load().then((_) => setState(() => _ready = true));
   }
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Moolve Calendar',
-      theme: ThemeData(
-        brightness: _isDark ? Brightness.dark : Brightness.light,
-        fontFamily: 'Georgia',
-      ),
-      home: CalendarHome(
-        isDark: _isDark,
-        isRu: _isRu,
-        prefs: widget.prefs,
-        onToggleTheme: _toggleTheme,
-        onToggleLang: _toggleLang,
+    if (!_ready) {
+      return const MaterialApp(
+          home: Scaffold(body: Center(child: CircularProgressIndicator())));
+    }
+    return AnimatedBuilder(
+      animation: _st,
+      builder: (_, __) => MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: _st.isDark ? _dark() : _light(),
+        home: CalendarHome(st: _st),
       ),
     );
   }
+
+  ThemeData _light() => ThemeData(
+      brightness: Brightness.light,
+      scaffoldBackgroundColor: const Color(0xFFF2F4F8),
+      colorScheme:
+      const ColorScheme.light(primary: Color(0xFF5A8FDB), surface: Colors.white));
+
+  ThemeData _dark() => ThemeData(
+      brightness: Brightness.dark,
+      scaffoldBackgroundColor: const Color(0xFF1A1D2E),
+      colorScheme: const ColorScheme.dark(
+          primary: Color(0xFF5A8FDB), surface: Color(0xFF252840)));
 }
 
-//  SCENE
-enum _Scene { newYear, spring, summer, autumn }
-_Scene _sceneFor(int m) {
-  if (m == 12 || m == 1 || m == 2 || m == 11) return _Scene.newYear;
-  if (m >= 3 && m <= 5) return _Scene.spring;
-  if (m >= 6 && m <= 8) return _Scene.summer;
-  return _Scene.autumn;
-}
+// ─── Home ────────────────────────────────────────────────────────────────────
 
-//  HOME
 class CalendarHome extends StatefulWidget {
-  final bool isDark;
-  final bool isRu;
-  final SharedPreferences prefs;
-  final VoidCallback onToggleTheme;
-  final VoidCallback onToggleLang;
-  const CalendarHome({
-    super.key,
-    required this.isDark,
-    required this.isRu,
-    required this.prefs,
-    required this.onToggleTheme,
-    required this.onToggleLang,
-  });
+  final AppState st;
+  const CalendarHome({super.key, required this.st});
   @override
   State<CalendarHome> createState() => _CalendarHomeState();
 }
 
 class _CalendarHomeState extends State<CalendarHome> {
-  final Map<String, List<DayEvent>> _ev = {};
-  late int _year;
-  final _now = DateTime.now();
-  bool _confetti = false;
+  late DateTime _month;
+  late DateTime _sel;
 
   @override
   void initState() {
     super.initState();
-    _year = _now.year;
-    _load();
+    final n = DateTime.now();
+    _month = DateTime(n.year, n.month);
+    _sel = n;
   }
 
-  void _load() {
-    final raw = widget.prefs.getString('cal_events_v3');
-    if (raw != null) {
-      try {
-        final m = jsonDecode(raw) as Map<String, dynamic>;
-        m.forEach((k, v) {
-          _ev[k] = (v as List).map((e) => DayEvent.fromJson(e as Map<String, dynamic>)).toList();
-        });
-      } catch (_) {}
-    }
-    _checkBirthday();
+  AppState get s => widget.st;
+
+  static String dk(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  String get _monthLabel {
+    const ru = ['Январь','Февраль','Март','Апрель','Май','Июнь',
+      'Июль','Август','Сентябрь','Октябрь','Ноябрь','Декабрь'];
+    const en = ['January','February','March','April','May','June',
+      'July','August','September','October','November','December'];
+    return '${(s.isRu ? ru : en)[_month.month - 1]} ${_month.year}';
   }
 
-  void _save() {
-    final out = <String, dynamic>{};
-    _ev.forEach((k, v) => out[k] = v.map((e) => e.toJson()).toList());
-    widget.prefs.setString('cal_events_v3', jsonEncode(out));
-  }
+  void _openAdd(DateTime day) => _openSheet(
+    _EventSheet(day: day, st: s, onChanged: () => setState(() {})),
+  );
 
-  void _checkBirthday() {
-    final k = _key(_now.year, _now.month, _now.day);
-    if ((_ev[k] ?? []).any((e) => e.type == EventType.birthday)) {
-      setState(() => _confetti = true);
-    }
-  }
+  void _openEdit(DateTime day, CalendarEvent ev) => _openSheet(
+    _EditSheet(
+      day: day, event: ev, st: s,
+      onSave: (u) async { await s.updateEvent(dk(day), u); setState(() {}); },
+      onDelete: () async { await s.deleteEvent(dk(day), ev.id); setState(() {}); },
+    ),
+  );
 
-  String _key(int y, int m, int d) =>
-      '$y-${m.toString().padLeft(2,'0')}-${d.toString().padLeft(2,'0')}';
-
-  List<DayEvent> _evFor(int m, int d) => _ev[_key(_year, m, d)] ?? [];
-  bool _today(int m, int d) => _now.month == m && _now.day == d && _now.year == _year;
-
-  // ── Settings bottom sheet ─────────────────────
-  void _openSettings() {
-    final isDark = widget.isDark;
-    final isRu   = widget.isRu;
-    final bg  = isDark ? const Color(0xFF12123A) : Colors.white;
-    final txt = isDark ? Colors.white : const Color(0xFF1A3A5C);
-    final acc = isDark ? const Color(0xFF7C4DFF) : const Color(0xFF2196F3);
-    final sub = isDark ? Colors.white54 : const Color(0xFF1A3A5C).withOpacity(0.45);
-
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (_) => Container(
-        decoration: BoxDecoration(
-          color: bg,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-          boxShadow: [BoxShadow(color: acc.withOpacity(0.2), blurRadius: 28)],
-        ),
-        padding: const EdgeInsets.all(24),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          // Handle
-          Center(child: Container(
-            width: 40, height: 4,
-            margin: const EdgeInsets.only(bottom: 20),
-            decoration: BoxDecoration(color: sub, borderRadius: BorderRadius.circular(2)),
-          )),
-          Text(
-            _t('Настройки', 'Settings', isRu),
-            style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: txt),
-          ),
-          const SizedBox(height: 24),
-
-          // Theme toggle row
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-            decoration: BoxDecoration(
-              color: acc.withOpacity(0.07),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: acc.withOpacity(0.2)),
-            ),
-            child: Row(children: [
-              Text(isDark ? '🌙' : '☀️', style: const TextStyle(fontSize: 22)),
-              const SizedBox(width: 12),
-              Expanded(child: Text(
-                _t(isDark ? 'Тёмная тема' : 'Светлая тема',
-                    isDark ? 'Dark theme'  : 'Light theme', isRu),
-                style: TextStyle(color: txt, fontSize: 15, fontWeight: FontWeight.w600),
-              )),
-              Switch(
-                value: isDark,
-                activeColor: acc,
-                onChanged: (_) {
-                  Navigator.pop(context);
-                  widget.onToggleTheme();
-                },
-              ),
-            ]),
-          ),
-          const SizedBox(height: 12),
-
-          // Language toggle row
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-            decoration: BoxDecoration(
-              color: acc.withOpacity(0.07),
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: acc.withOpacity(0.2)),
-            ),
-            child: Row(children: [
-              const Text('🌍', style: TextStyle(fontSize: 22)),
-              const SizedBox(width: 12),
-              Expanded(child: Text(
-                _t('Язык', 'Language', isRu),
-                style: TextStyle(color: txt, fontSize: 15, fontWeight: FontWeight.w600),
-              )),
-              // RU / EN pill toggle
-              GestureDetector(
-                onTap: () {
-                  Navigator.pop(context);
-                  widget.onToggleLang();
-                },
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 300),
-                  width: 80, height: 34,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(17),
-                    color: acc.withOpacity(0.15),
-                    border: Border.all(color: acc.withOpacity(0.4)),
-                  ),
-                  child: Stack(children: [
-                    AnimatedPositioned(
-                      duration: const Duration(milliseconds: 300),
-                      curve: Curves.easeInOut,
-                      left: isRu ? 2 : 42, top: 2,
-                      child: Container(
-                        width: 36, height: 30,
-                        decoration: BoxDecoration(
-                          color: acc,
-                          borderRadius: BorderRadius.circular(15),
-                        ),
-                        child: Center(child: Text(
-                          isRu ? 'RU' : 'EN',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        )),
-                      ),
-                    ),
-                    Positioned(
-                      left: isRu ? 44 : 6, top: 8,
-                      child: Text(
-                        isRu ? 'EN' : 'RU',
-                        style: TextStyle(
-                          color: txt.withOpacity(0.4),
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ),
-                  ]),
-                ),
-              ),
-            ]),
-          ),
-          const SizedBox(height: 24),
-        ]),
-      ),
-    );
-  }
+  void _openSheet(Widget sheet) => showModalBottomSheet(
+    context: context,
+    backgroundColor: Colors.transparent,
+    isScrollControlled: true,
+    builder: (_) => sheet,
+  );
 
   @override
   Widget build(BuildContext context) {
-    return Stack(children: [
-      Positioned.fill(child: widget.isDark ? const _NightBg() : const _DayBg()),
-      Scaffold(
-        backgroundColor: Colors.transparent,
-        body: SafeArea(child: Column(children: [
-          _TopBar(
-            isDark: widget.isDark,
-            isRu: widget.isRu,
-            year: _year,
-            onYear: (y) => setState(() => _year = y),
-            onSettings: _openSettings,
-          ),
-          Expanded(child: ListView.builder(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            itemCount: 12,
-            itemBuilder: (ctx, i) {
-              final m = i + 1;
-              return _MonthBlock(
-                month: m, year: _year,
-                isDark: widget.isDark,
-                isRu: widget.isRu,
-                eventsFor: (d) => _evFor(m, d),
-                isToday: (d) => _today(m, d),
-                onTap: (d) => _showSheet(ctx, m, d),
-              );
-            },
-          )),
-        ])),
-      ),
-      if (_confetti)
-        Positioned.fill(child: _ConfettiLayer(
-            onDismiss: () => setState(() => _confetti = false))),
-    ]);
-  }
+    final dark = s.isDark;
+    final bg = dark ? const Color(0xFF1A1D2E) : const Color(0xFFF2F4F8);
+    final card = dark ? const Color(0xFF252840) : Colors.white;
+    final txt = dark ? Colors.white : const Color(0xFF1A1D2E);
+    final sub = const Color(0xFF8890AA);
 
-  void _showSheet(BuildContext ctx, int m, int d) {
-    final k = _key(_year, m, d);
-    showModalBottomSheet(
-      context: ctx,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (_) => _Sheet(
-        month: m, day: d, year: _year,
-        isDark: widget.isDark,
-        isRu: widget.isRu,
-        current: List.from(_ev[k] ?? []),
-        onSave: (list) {
-          setState(() { list.isEmpty ? _ev.remove(k) : _ev[k] = list; });
-          _save();
-          if (list.any((e) => e.type == EventType.birthday) && _today(m, d)) {
-            setState(() => _confetti = true);
-          }
-        },
+    return AnimatedBuilder(
+      animation: s,
+      builder: (_, __) => Scaffold(
+        backgroundColor: bg,
+        body: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.only(bottom: 32),
+            children: [
+              // Title
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 12, 8),
+                child: Row(children: [
+                  Text(s.isRu ? 'Календарь' : 'Calendar',
+                      style: TextStyle(fontSize: 26, fontWeight: FontWeight.w700, color: txt)),
+                  const Spacer(),
+                  _MenuBtn(st: s),
+                ]),
+              ),
+
+              // Month nav
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 20),
+                child: Row(children: [
+                  _Arrow(
+                    icon: Icons.chevron_left,
+                    onTap: () => setState(() =>
+                    _month = DateTime(_month.year, _month.month - 1)),
+                    dark: dark,
+                  ),
+                  const SizedBox(width: 12),
+                  Text(_monthLabel,
+                      style: TextStyle(fontSize: 17, fontWeight: FontWeight.w600, color: txt)),
+                  const SizedBox(width: 12),
+                  _Arrow(
+                    icon: Icons.chevron_right,
+                    onTap: () => setState(() =>
+                    _month = DateTime(_month.year, _month.month + 1)),
+                    dark: dark,
+                  ),
+                ]),
+              ),
+              const SizedBox(height: 16),
+
+              // Calendar
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: card,
+                    borderRadius: BorderRadius.circular(24),
+                    boxShadow: [
+                      BoxShadow(
+                          color: Colors.black.withOpacity(dark ? 0.3 : 0.06),
+                          blurRadius: 20,
+                          offset: const Offset(0, 4))
+                    ],
+                  ),
+                  padding: const EdgeInsets.all(16),
+                  child: _Grid(
+                    month: _month,
+                    sel: _sel,
+                    st: s,
+                    dark: dark,
+                    weekLabels: s.isRu
+                        ? ['Вс','Пн','Вт','Ср','Чт','Пт','Сб']
+                        : ['Su','Mo','Tu','We','Th','Fr','Sa'],
+                    onTap: (d) {
+                      setState(() => _sel = d);
+                      _openAdd(d);
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+
+              // Day summary
+              _DayPanel(
+                day: _sel,
+                st: s,
+                card: card,
+                txt: txt,
+                sub: sub,
+                onEdit: (ev) => _openEdit(_sel, ev),
+                onDelete: (ev) async {
+                  await s.deleteEvent(dk(_sel), ev.id);
+                  setState(() {});
+                },
+                onAdd: () => _openAdd(_sel),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 }
 
-//  TOP BAR  — тема убрана, добавлена шестерёнка
-class _TopBar extends StatelessWidget {
-  final bool isDark;
-  final bool isRu;
-  final int year;
-  final ValueChanged<int> onYear;
-  final VoidCallback onSettings;
+// ─── Grid ────────────────────────────────────────────────────────────────────
 
-  const _TopBar({
-    required this.isDark,
-    required this.isRu,
-    required this.year,
-    required this.onYear,
-    required this.onSettings,
+class _Grid extends StatelessWidget {
+  final DateTime month, sel;
+  final AppState st;
+  final bool dark;
+  final List<String> weekLabels;
+  final void Function(DateTime) onTap;
+
+  const _Grid({
+    required this.month, required this.sel, required this.st,
+    required this.dark, required this.weekLabels, required this.onTap,
   });
+
+  static String dk(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   @override
   Widget build(BuildContext context) {
-    final txt = isDark ? Colors.white : const Color(0xFF1A3A5C);
-    final acc = isDark ? const Color(0xFF7C4DFF) : const Color(0xFF2196F3);
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-      child: Row(children: [
-        _Btn(icon: Icons.chevron_left_rounded, color: acc,
-            onTap: () => onYear(year - 1)),
-        const SizedBox(width: 8),
-        Text('$year', style: TextStyle(
-            fontSize: 28, fontWeight: FontWeight.bold,
-            color: txt, letterSpacing: 2)),
-        const SizedBox(width: 8),
-        _Btn(icon: Icons.chevron_right_rounded, color: acc,
-            onTap: () => onYear(year + 1)),
-        const Spacer(),
-        // ⚙️ Settings button
-        GestureDetector(
-          onTap: onSettings,
-          child: Container(
-            width: 42, height: 42,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: acc.withOpacity(0.15),
-              border: Border.all(color: acc.withOpacity(0.4)),
-              boxShadow: [BoxShadow(color: acc.withOpacity(0.3), blurRadius: 8)],
+    final first = DateTime(month.year, month.month, 1);
+    final last = DateTime(month.year, month.month + 1, 0);
+    final off = first.weekday % 7;
+    final cells = <DateTime?>[];
+    for (int i = 0; i < off; i++) cells.add(null);
+    for (int d = 1; d <= last.day; d++) cells.add(DateTime(month.year, month.month, d));
+    while (cells.length % 7 != 0) cells.add(null);
+
+    final lc = dark ? const Color(0xFF8890AA) : const Color(0xFF9DA3B4);
+
+    return Column(children: [
+      Row(
+        children: weekLabels.asMap().entries.map((e) {
+          final we = e.key == 0 || e.key == 6;
+          return Expanded(
+            child: Center(
+              child: Text(e.value,
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: we ? const Color(0xFFE07070).withOpacity(0.8) : lc)),
             ),
-            child: Icon(Icons.settings_rounded, color: acc, size: 22),
-          ),
+          );
+        }).toList(),
+      ),
+      const SizedBox(height: 8),
+      ...List.generate(cells.length ~/ 7, (row) {
+        final rowDays = cells.sublist(row * 7, row * 7 + 7);
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: _Row(days: rowDays, sel: sel, st: st, dark: dark, onTap: onTap),
+        );
+      }),
+    ]);
+  }
+}
+
+class _Row extends StatelessWidget {
+  final List<DateTime?> days;
+  final DateTime sel;
+  final AppState st;
+  final bool dark;
+  final void Function(DateTime) onTap;
+
+  const _Row({
+    required this.days, required this.sel, required this.st,
+    required this.dark, required this.onTap,
+  });
+
+  static String dk(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  @override
+  Widget build(BuildContext context) {
+    final hasEv = days.map((d) => d != null && st.hasEvents(dk(d))).toList();
+
+    // Find consecutive runs ≥ 2
+    final Map<int, int> runs = {};
+    int i = 0;
+    while (i < days.length) {
+      if (hasEv[i]) {
+        int j = i;
+        while (j < days.length && hasEv[j]) j++;
+        if (j - i >= 2) for (int k = i; k < j; k++) runs[k] = j - i;
+        i = j;
+      } else { i++; }
+    }
+
+    // Pill start -> length
+    final Map<int, int> pills = {};
+    int p = 0;
+    while (p < days.length) {
+      if (runs.containsKey(p) && !pills.containsKey(p)) {
+        final len = runs[p]!;
+        pills[p] = len;
+        p += len;
+      } else { p++; }
+    }
+
+    return SizedBox(
+      height: 48,
+      child: Stack(children: [
+        // Blue pills
+        ...pills.entries.map((e) {
+          final start = e.key;
+          final len = e.value;
+          const blue = Color(0xFF5A8FDB);
+          return Positioned.fill(
+            child: LayoutBuilder(builder: (_, c) {
+              final cw = c.maxWidth / 7;
+              return Stack(children: [
+                Positioned(
+                  left: start * cw + 2,
+                  top: 4,
+                  width: len * cw - 4,
+                  bottom: 4,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: blue.withOpacity(0.13),
+                      border: Border.all(color: blue.withOpacity(0.35), width: 1.2),
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                  ),
+                ),
+              ]);
+            }),
+          );
+        }),
+
+        // Cells
+        Row(
+          children: List.generate(days.length, (idx) {
+            final day = days[idx];
+            if (day == null) return const Expanded(child: SizedBox());
+
+            final key = dk(day);
+            final evs = st.getEvents(key);
+            final isSel = day.year == sel.year && day.month == sel.month && day.day == sel.day;
+            final isToday = day.year == DateTime.now().year &&
+                day.month == DateTime.now().month && day.day == DateTime.now().day;
+            final isWE = day.weekday == DateTime.saturday || day.weekday == DateTime.sunday;
+            final hasEv = evs.isNotEmpty;
+            final inPill = runs.containsKey(idx);
+
+            Color? bg;
+            Color textClr;
+            FontWeight fw = FontWeight.w500;
+
+            if (isSel && !hasEv) {
+              bg = const Color(0xFF5A8FDB);
+              textClr = Colors.white;
+              fw = FontWeight.w700;
+            } else if (isToday && !hasEv) {
+              bg = const Color(0xFF5A8FDB).withOpacity(0.15);
+              textClr = const Color(0xFF5A8FDB);
+              fw = FontWeight.w700;
+            } else if (hasEv && !inPill) {
+              bg = evs.first.type.color.withOpacity(0.18);
+              textClr = evs.first.type.color;
+              fw = FontWeight.w700;
+            } else if (hasEv && inPill) {
+              textClr = const Color(0xFF5A8FDB);
+              fw = FontWeight.w700;
+            } else if (isWE) {
+              textClr = const Color(0xFFE07070);
+            } else {
+              textClr = dark ? Colors.white70 : const Color(0xFF2D3250);
+            }
+
+            return Expanded(
+              child: GestureDetector(
+                onTap: () => onTap(day),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 160),
+                  margin: const EdgeInsets.all(2),
+                  decoration: BoxDecoration(color: bg, borderRadius: BorderRadius.circular(14)),
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      Padding(
+                        padding: EdgeInsets.only(bottom: evs.length > 1 ? 6 : 0),
+                        child: Text('${day.day}',
+                            style: TextStyle(fontSize: 15, fontWeight: fw, color: textClr)),
+                      ),
+                      if (hasEv && evs.length > 1)
+                        Positioned(
+                          bottom: 3,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: evs.take(3).map((ev) => Container(
+                              width: 4, height: 4,
+                              margin: const EdgeInsets.symmetric(horizontal: 1),
+                              decoration: BoxDecoration(
+                                color: inPill
+                                    ? const Color(0xFF5A8FDB).withOpacity(0.6)
+                                    : ev.type.color.withOpacity(0.7),
+                                shape: BoxShape.circle,
+                              ),
+                            )).toList(),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }),
         ),
       ]),
     );
   }
 }
 
-class _Btn extends StatelessWidget {
-  final IconData icon; final Color color; final VoidCallback onTap;
-  const _Btn({required this.icon, required this.color, required this.onTap});
-  @override
-  Widget build(BuildContext context) => GestureDetector(
-    onTap: onTap,
-    child: Container(
-      width: 32, height: 32,
-      decoration: BoxDecoration(shape: BoxShape.circle,
-          color: color.withOpacity(0.15),
-          border: Border.all(color: color.withOpacity(0.4))),
-      child: Icon(icon, color: color, size: 18),
-    ),
-  );
-}
+// ─── Day Panel ───────────────────────────────────────────────────────────────
 
-//  MONTH BLOCK
-class _MonthBlock extends StatelessWidget {
-  final int month, year; final bool isDark, isRu;
-  final List<DayEvent> Function(int) eventsFor;
-  final bool Function(int) isToday;
-  final void Function(int) onTap;
-  const _MonthBlock({required this.month, required this.year,
-    required this.isDark, required this.isRu,
-    required this.eventsFor, required this.isToday, required this.onTap});
+class _DayPanel extends StatelessWidget {
+  final DateTime day;
+  final AppState st;
+  final Color card, txt, sub;
+  final void Function(CalendarEvent) onEdit;
+  final void Function(CalendarEvent) onDelete;
+  final VoidCallback onAdd;
 
-  int get _days => DateUtils.getDaysInMonth(year, month);
-  int get _startWd => DateTime(year, month, 1).weekday - 1;
+  const _DayPanel({
+    required this.day, required this.st, required this.card,
+    required this.txt, required this.sub,
+    required this.onEdit, required this.onDelete, required this.onAdd,
+  });
+
+  static String dk(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  String _label(bool ru) {
+    const rm = ['','января','февраля','марта','апреля','мая','июня',
+      'июля','августа','сентября','октября','ноября','декабря'];
+    const em = ['','Jan','Feb','Mar','Apr','May','Jun',
+      'Jul','Aug','Sep','Oct','Nov','Dec'];
+    return ru ? '${day.day} ${rm[day.month]}' : '${em[day.month]} ${day.day}';
+  }
 
   @override
   Widget build(BuildContext context) {
-    final rows = ((_startWd + _days) / 7).ceil();
-    final acc = isDark ? const Color(0xFF7C4DFF) : const Color(0xFF2196F3);
-    final wd = _weekDays(isRu);
-    return Container(
-      margin: const EdgeInsets.only(bottom: 16),
-      decoration: BoxDecoration(
-        color: isDark ? Colors.white.withOpacity(0.05) : Colors.white.withOpacity(0.62),
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: isDark
-            ? Colors.white.withOpacity(0.1) : const Color(0xFF90CAF9).withOpacity(0.4)),
-        boxShadow: [BoxShadow(color: acc.withOpacity(0.08), blurRadius: 20, spreadRadius: 2)],
-      ),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(20),
-        child: Column(children: [
-          _Header(month: month, isDark: isDark, isRu: isRu, scene: _sceneFor(month)),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-            child: Row(children: List.generate(7, (i) {
-              final isSat = i == 5; final isSun = i == 6;
-              return Expanded(child: Center(child: Text(wd[i],
-                  style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold,
-                    color: isSun ? const Color(0xFFFF5252)
-                        : isSat ? acc
-                        : (isDark ? Colors.white54 : const Color(0xFF1A3A5C).withOpacity(0.45)),
-                  ))));
-            })),
-          ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(8, 0, 8, 10),
-            child: Column(children: List.generate(rows, (row) => Row(
-              children: List.generate(7, (col) {
-                final idx = row * 7 + col;
-                final d = idx - _startWd + 1;
-                if (d < 1 || d > _days) return const Expanded(child: SizedBox(height: 46));
-                return Expanded(child: _Cell(
-                  day: d, col: col, isDark: isDark,
-                  events: eventsFor(d), isToday: isToday(d),
-                  onTap: () => onTap(d),
-                ));
-              }),
-            ))),
-          ),
-        ]),
-      ),
-    );
-  }
-}
+    final evs = st.getEvents(dk(day));
+    final ru = st.isRu;
+    final canAdd = evs.length < 3;
 
-//  MONTH HEADER
-class _Header extends StatelessWidget {
-  final int month; final bool isDark, isRu; final _Scene scene;
-  const _Header({required this.month, required this.isDark,
-    required this.isRu, required this.scene});
-
-  List<Color> _grad() {
-    if (isDark) return [const Color(0xFF7C4DFF).withOpacity(0.7), const Color(0xFF40C4FF).withOpacity(0.5)];
-    switch (scene) {
-      case _Scene.newYear: return [const Color(0xFF1565C0), const Color(0xFF42A5F5)];
-      case _Scene.spring:  return [const Color(0xFF43A047), const Color(0xFFAED581)];
-      case _Scene.summer:  return [const Color(0xFF0288D1), const Color(0xFF00ACC1)];
-      case _Scene.autumn:  return [const Color(0xFFBF360C), const Color(0xFFFFB300)];
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) => Container(
-    height: 115,
-    decoration: BoxDecoration(gradient: LinearGradient(
-        colors: _grad(), begin: Alignment.topLeft, end: Alignment.bottomRight)),
-    child: Stack(children: [
-      Positioned.fill(child: CustomPaint(painter: _IlluPainter(scene: scene, isDark: isDark))),
-      Positioned(left: 16, bottom: 12, child: Text(
-        _monthName(month, isRu),
-        style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold,
-            color: Colors.white,
-            shadows: [Shadow(color: Colors.black45, blurRadius: 6)]),
-      )),
-    ]),
-  );
-}
-
-//  ILLUSTRATION PAINTER — без изменений
-class _IlluPainter extends CustomPainter {
-  final _Scene scene; final bool isDark;
-  const _IlluPainter({required this.scene, required this.isDark});
-
-  @override
-  void paint(Canvas c, Size s) {
-    switch (scene) {
-      case _Scene.newYear: _newYear(c, s); break;
-      case _Scene.spring:  _spring(c, s);  break;
-      case _Scene.summer:  _summer(c, s);  break;
-      case _Scene.autumn:  _autumn(c, s);  break;
-    }
-  }
-
-  Paint _p([Color col = Colors.white, PaintingStyle st = PaintingStyle.fill]) =>
-      Paint()..style = st..color = col;
-
-  void _cloud(Canvas c, double cx, double cy, double sc) {
-    final p = _p(Colors.white.withOpacity(0.32));
-    c.drawCircle(Offset(cx, cy), 15 * sc, p);
-    c.drawCircle(Offset(cx + 17*sc, cy + 4*sc), 11 * sc, p);
-    c.drawCircle(Offset(cx - 14*sc, cy + 5*sc), 10 * sc, p);
-    c.drawCircle(Offset(cx + 6*sc, cy + 10*sc), 12 * sc, p);
-    c.drawCircle(Offset(cx - 5*sc, cy + 10*sc), 11 * sc, p);
-  }
-
-  void _sun(Canvas c, double cx, double cy, double r) {
-    c.drawCircle(Offset(cx, cy), r, _p(Colors.yellow.withOpacity(0.9)));
-    final rays = Paint()..style = PaintingStyle.stroke
-      ..strokeWidth = 2..color = Colors.yellow.withOpacity(0.45);
-    for (int i = 0; i < 8; i++) {
-      final a = i * pi / 4;
-      c.drawLine(Offset(cx + cos(a)*(r+3), cy + sin(a)*(r+3)),
-          Offset(cx + cos(a)*(r+14), cy + sin(a)*(r+14)), rays);
-    }
-  }
-
-  void _fir(Canvas c, double cx, double base, double h) {
-    final p = _p(Colors.white.withOpacity(0.38));
-    for (int i = 0; i < 3; i++) {
-      final tier = h * (0.42 + i * 0.2);
-      final y = base - h * (0.55 - i * 0.17);
-      c.drawPath(Path()
-        ..moveTo(cx, y - tier*0.5)
-        ..lineTo(cx - tier*0.45, y + tier*0.15)
-        ..lineTo(cx + tier*0.45, y + tier*0.15)
-        ..close(), p);
-    }
-    c.drawRect(Rect.fromCenter(center: Offset(cx, base+5), width: 7, height: 11),
-        _p(Colors.white.withOpacity(0.2)));
-  }
-
-  void _newYear(Canvas c, Size s) {
-    c.drawRRect(RRect.fromRectAndCorners(
-        Rect.fromLTWH(0, s.height*0.72, s.width, s.height),
-        topLeft: const Radius.circular(28), topRight: const Radius.circular(28)),
-        _p(Colors.white.withOpacity(0.22)));
-    _fir(c, s.width*0.7, s.height*0.73, 40);
-    _fir(c, s.width*0.82, s.height*0.7, 28);
-    _fir(c, s.width*0.58, s.height*0.75, 24);
-    c.drawCircle(Offset(s.width*0.15, s.height*0.22), 15, _p(Colors.white.withOpacity(0.9)));
-    c.drawCircle(Offset(s.width*0.19, s.height*0.19), 12, _p(const Color(0xFF1565C0)));
-    final rnd = Random(7);
-    for (int i = 0; i < 22; i++) {
-      c.drawCircle(Offset(rnd.nextDouble()*s.width, rnd.nextDouble()*s.height*0.65),
-          rnd.nextDouble()*2 + 0.5, _p(Colors.white.withOpacity(0.7)));
-    }
-  }
-
-  void _flower(Canvas c, double cx, double cy, double r) {
-    final petals = _p(Colors.white.withOpacity(0.8));
-    for (int i = 0; i < 5; i++) {
-      final a = i * 2 * pi / 5;
-      c.drawCircle(Offset(cx + cos(a)*r, cy + sin(a)*r), r*0.7, petals);
-    }
-    c.drawCircle(Offset(cx, cy), r*0.6, _p(Colors.yellow.withOpacity(0.9)));
-    c.drawLine(Offset(cx, cy+r+2), Offset(cx, cy+r+14),
-        Paint()..style = PaintingStyle.stroke..strokeWidth = 1.5..color = Colors.white.withOpacity(0.5));
-  }
-
-  void _spring(Canvas c, Size s) {
-    c.drawRRect(RRect.fromRectAndCorners(
-        Rect.fromLTWH(0, s.height*0.75, s.width, s.height),
-        topLeft: const Radius.circular(28), topRight: const Radius.circular(28)),
-        _p(Colors.white.withOpacity(0.18)));
-    _sun(c, s.width*0.8, s.height*0.22, 18);
-    _cloud(c, s.width*0.14, s.height*0.17, 0.85);
-    _cloud(c, s.width*0.47, s.height*0.11, 1.05);
-    _flower(c, s.width*0.2, s.height*0.84, 8);
-    _flower(c, s.width*0.38, s.height*0.79, 7);
-    _flower(c, s.width*0.57, s.height*0.86, 9);
-  }
-
-  void _summer(Canvas c, Size s) {
-    c.drawRRect(RRect.fromRectAndCorners(
-        Rect.fromLTWH(0, s.height*0.58, s.width, s.height),
-        topLeft: const Radius.circular(22), topRight: const Radius.circular(22)),
-        _p(Colors.white.withOpacity(0.22)));
-    for (int w = 0; w < 3; w++) {
-      final wy = s.height*(0.63 + w*0.07);
-      final path = Path()..moveTo(0, wy);
-      for (double x = 0; x <= s.width; x += 8) {
-        path.lineTo(x, wy + sin(x/14 + w)*3);
-      }
-      c.drawPath(path, Paint()..style = PaintingStyle.stroke
-        ..strokeWidth = 1.8..color = Colors.white.withOpacity(0.4));
-    }
-    c.drawRRect(RRect.fromRectAndCorners(
-        Rect.fromLTWH(0, s.height*0.72, s.width, s.height),
-        topLeft: const Radius.circular(10), topRight: const Radius.circular(10)),
-        _p(Colors.yellow.withOpacity(0.22)));
-    _sun(c, s.width*0.76, s.height*0.18, 20);
-    _cloud(c, s.width*0.14, s.height*0.14, 0.8);
-    _cloud(c, s.width*0.45, s.height*0.09, 1.0);
-    c.drawArc(Rect.fromCenter(center: Offset(s.width*0.22, s.height*0.71),
-        width: 54, height: 34), pi, pi, true, _p(Colors.red.withOpacity(0.5)));
-    c.drawArc(Rect.fromCenter(center: Offset(s.width*0.22, s.height*0.71),
-        width: 54, height: 34), pi+0.35, pi/3, true, _p(Colors.white.withOpacity(0.45)));
-    c.drawLine(Offset(s.width*0.22, s.height*0.71), Offset(s.width*0.22, s.height*0.86),
-        Paint()..style = PaintingStyle.stroke..strokeWidth = 1.5..color = Colors.white.withOpacity(0.6));
-  }
-
-  void _autumn(Canvas c, Size s) {
-    c.drawRRect(RRect.fromRectAndCorners(
-        Rect.fromLTWH(0, s.height*0.75, s.width, s.height),
-        topLeft: const Radius.circular(28), topRight: const Radius.circular(28)),
-        _p(Colors.white.withOpacity(0.18)));
-    final trunk = Paint()..style = PaintingStyle.stroke
-      ..strokeWidth = 5..color = Colors.white.withOpacity(0.4)..strokeCap = StrokeCap.round;
-    c.drawLine(Offset(s.width*0.68, s.height*0.75), Offset(s.width*0.68, s.height*0.33), trunk);
-    c.drawLine(Offset(s.width*0.68, s.height*0.5), Offset(s.width*0.57, s.height*0.39), trunk);
-    c.drawLine(Offset(s.width*0.68, s.height*0.44), Offset(s.width*0.79, s.height*0.37), trunk);
-    c.drawCircle(Offset(s.width*0.68, s.height*0.26), 27, _p(Colors.orange.withOpacity(0.45)));
-    c.drawCircle(Offset(s.width*0.59, s.height*0.30), 18, _p(Colors.deepOrange.withOpacity(0.38)));
-    c.drawCircle(Offset(s.width*0.77, s.height*0.29), 17, _p(Colors.yellow.withOpacity(0.4)));
-    final rnd = Random(13);
-    final lc = [Colors.orange, Colors.deepOrange, Colors.yellow, Colors.red];
-    for (int i = 0; i < 14; i++) {
-      c.save();
-      c.translate(rnd.nextDouble()*s.width*0.95, rnd.nextDouble()*s.height*0.95);
-      c.rotate(rnd.nextDouble()*2*pi);
-      c.drawOval(Rect.fromCenter(center: Offset.zero, width: 11, height: 6),
-          _p(lc[rnd.nextInt(lc.length)].withOpacity(0.55)));
-      c.restore();
-    }
-    c.drawCircle(Offset(s.width*0.15, s.height*0.2), 14, _p(Colors.yellow.withOpacity(0.5)));
-  }
-
-  @override
-  bool shouldRepaint(_IlluPainter o) => false;
-}
-
-//  DAY CELL
-class _Cell extends StatelessWidget {
-  final int day, col; final bool isDark, isToday;
-  final List<DayEvent> events; final VoidCallback onTap;
-  const _Cell({required this.day, required this.col, required this.isDark,
-    required this.isToday, required this.events, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final isSun = col == 6; final isSat = col == 5;
-    final acc = isDark ? const Color(0xFF7C4DFF) : const Color(0xFF2196F3);
-    Color txt;
-    if (isToday) txt = Colors.white;
-    else if (isSun) txt = const Color(0xFFFF5252);
-    else if (isSat) txt = acc;
-    else txt = isDark ? Colors.white.withOpacity(0.85) : const Color(0xFF1A3A5C);
-
-    return GestureDetector(
-      onTap: onTap,
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       child: Container(
-        height: 46,
-        margin: const EdgeInsets.all(1.5),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(10),
-          gradient: isToday ? LinearGradient(
-              colors: isDark
-                  ? [const Color(0xFF7C4DFF), const Color(0xFF40C4FF)]
-                  : [const Color(0xFF2196F3), const Color(0xFF64B5F6)],
-              begin: Alignment.topLeft, end: Alignment.bottomRight) : null,
-          color: isToday ? null
-              : events.isNotEmpty ? events.first.type.color.withOpacity(isDark ? 0.22 : 0.15)
-              : isDark ? Colors.white.withOpacity(0.04) : const Color(0xFF2196F3).withOpacity(0.04),
-          border: events.isNotEmpty && !isToday
-              ? Border.all(color: events.first.type.color.withOpacity(0.45)) : null,
-          boxShadow: isToday ? [BoxShadow(color: acc.withOpacity(0.5), blurRadius: 8)] : null,
+          color: card,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.06), blurRadius: 12, offset: const Offset(0, 2))],
         ),
-        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-          Text('$day', style: TextStyle(fontSize: 13,
-              fontWeight: isToday ? FontWeight.bold : FontWeight.normal, color: txt)),
-          if (events.isNotEmpty)
-            Wrap(alignment: WrapAlignment.center, children: events.take(3)
-                .map((e) => Text(e.type.emoji, style: const TextStyle(fontSize: 7))).toList()),
-        ]),
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              Text(
+                ru ? 'Задачи на ${_label(ru)}' : 'Tasks for ${_label(ru)}',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700, color: txt),
+              ),
+              const Spacer(),
+              if (canAdd)
+                GestureDetector(
+                  onTap: onAdd,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF5A8FDB).withOpacity(0.12),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(children: [
+                      const Icon(Icons.add, size: 14, color: Color(0xFF5A8FDB)),
+                      const SizedBox(width: 3),
+                      Text(ru ? 'Добавить' : 'Add',
+                          style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Color(0xFF5A8FDB))),
+                    ]),
+                  ),
+                ),
+            ]),
+            const SizedBox(height: 10),
+            if (evs.isEmpty)
+              Text(
+                ru ? 'Нет событий. Нажмите на дату, чтобы добавить.' : 'No events. Tap a date to add.',
+                style: TextStyle(fontSize: 13, color: sub),
+              )
+            else
+              ...evs.map((ev) => _Tile(
+                event: ev, ru: ru, dark: st.isDark,
+                onEdit: () => onEdit(ev),
+                onDelete: () => onDelete(ev),
+              )),
+            if (evs.length >= 3)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  ru ? '⚠️ Максимум 3 события на день' : '⚠️ Max 3 events per day',
+                  style: TextStyle(fontSize: 11, color: sub),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
 }
 
-//  EVENT SHEET
-class _Sheet extends StatefulWidget {
-  final int month, day, year; final bool isDark, isRu;
-  final List<DayEvent> current;
-  final void Function(List<DayEvent>) onSave;
-  const _Sheet({required this.month, required this.day, required this.year,
-    required this.isDark, required this.isRu,
-    required this.current, required this.onSave});
+class _Tile extends StatelessWidget {
+  final CalendarEvent event;
+  final bool ru, dark;
+  final VoidCallback onEdit, onDelete;
+
+  const _Tile({required this.event, required this.ru, required this.dark,
+    required this.onEdit, required this.onDelete});
+
   @override
-  State<_Sheet> createState() => _SheetState();
+  Widget build(BuildContext context) {
+    final c = event.type.color;
+    return Dismissible(
+      key: Key(event.id),
+      direction: DismissDirection.endToStart,
+      background: Container(
+        margin: const EdgeInsets.only(bottom: 8),
+        decoration: BoxDecoration(
+          color: Colors.red.withOpacity(0.12),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 16),
+        child: const Icon(Icons.delete_outline, color: Colors.red, size: 22),
+      ),
+      confirmDismiss: (_) async {
+        return await showDialog<bool>(
+          context: context,
+          builder: (_) => _ConfirmDelete(event: event, ru: ru, dark: dark),
+        ) ?? false;
+      },
+      onDismissed: (_) => onDelete(),
+      child: GestureDetector(
+        onTap: onEdit,
+        child: Container(
+          margin: const EdgeInsets.only(bottom: 8),
+          decoration: BoxDecoration(
+            color: c.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: c.withOpacity(0.22), width: 1),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          child: Row(children: [
+            Text(event.type.emoji, style: const TextStyle(fontSize: 20)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(children: [
+                    Text(event.type.label(ru),
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: c)),
+                    if (event.time.isNotEmpty) ...[
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: c.withOpacity(0.13),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: Row(children: [
+                          Icon(Icons.access_time, size: 10, color: c),
+                          const SizedBox(width: 3),
+                          Text(event.time,
+                              style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: c)),
+                        ]),
+                      ),
+                    ],
+                  ]),
+                  if (event.note.isNotEmpty) ...[
+                    const SizedBox(height: 2),
+                    Text(event.note,
+                        style: TextStyle(fontSize: 12,
+                            color: dark ? Colors.white54 : const Color(0xFF6B7280)),
+                        maxLines: 2, overflow: TextOverflow.ellipsis),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Column(children: [
+              Icon(Icons.edit_outlined, size: 16, color: c.withOpacity(0.55)),
+              const SizedBox(height: 4),
+              Icon(Icons.delete_outline, size: 16, color: Colors.red.withOpacity(0.45)),
+            ]),
+          ]),
+        ),
+      ),
+    );
+  }
 }
 
-class _SheetState extends State<_Sheet> {
-  late List<DayEvent> _list;
-  EventType? _pick;
-  final _ctrl = TextEditingController();
+class _ConfirmDelete extends StatelessWidget {
+  final CalendarEvent event;
+  final bool ru, dark;
+  const _ConfirmDelete({required this.event, required this.ru, required this.dark});
 
   @override
-  void initState() { super.initState(); _list = List.from(widget.current); }
-  @override
-  void dispose() { _ctrl.dispose(); super.dispose(); }
+  Widget build(BuildContext context) => AlertDialog(
+    backgroundColor: dark ? const Color(0xFF252840) : Colors.white,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+    title: Text(ru ? 'Удалить?' : 'Delete?',
+        style: TextStyle(color: dark ? Colors.white : Colors.black)),
+    content: Text('${event.type.emoji} ${event.type.label(ru)}',
+        style: TextStyle(color: dark ? Colors.white70 : Colors.black54)),
+    actions: [
+      TextButton(onPressed: () => Navigator.pop(context, false),
+          child: Text(ru ? 'Отмена' : 'Cancel')),
+      TextButton(onPressed: () => Navigator.pop(context, true),
+          child: Text(ru ? 'Удалить' : 'Delete',
+              style: const TextStyle(color: Colors.red))),
+    ],
+  );
+}
 
-  void _add() {
-    if (_pick == null) return;
-    _list.removeWhere((e) => e.type == _pick);
-    _list.add(DayEvent(type: _pick!, note: _ctrl.text.trim()));
-    setState(() { _pick = null; _ctrl.clear(); });
+// ─── Add Event Sheet ──────────────────────────────────────────────────────────
+
+class _EventSheet extends StatefulWidget {
+  final DateTime day;
+  final AppState st;
+  final VoidCallback onChanged;
+  const _EventSheet({required this.day, required this.st, required this.onChanged});
+  @override
+  State<_EventSheet> createState() => _EventSheetState();
+}
+
+class _EventSheetState extends State<_EventSheet> {
+  EventType? _type;
+  final _noteCtrl = TextEditingController();
+  TimeOfDay? _time;
+
+  static String dk(DateTime d) =>
+      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+
+  AppState get s => widget.st;
+  bool get ru => s.isRu;
+  bool get dark => s.isDark;
+
+  @override
+  void dispose() { _noteCtrl.dispose(); super.dispose(); }
+
+  Future<void> _pickTime() async {
+    final t = await showTimePicker(
+      context: context,
+      initialTime: _time ?? TimeOfDay.now(),
+      builder: (ctx, child) => MediaQuery(
+        data: MediaQuery.of(ctx).copyWith(alwaysUse24HourFormat: true),
+        child: child!,
+      ),
+    );
+    if (t != null) setState(() => _time = t);
+  }
+
+  String get _timeStr => _time != null
+      ? '${_time!.hour.toString().padLeft(2, '0')}:${_time!.minute.toString().padLeft(2, '0')}'
+      : '';
+
+  Future<void> _save() async {
+    if (_type == null) return;
+    await s.addEvent(
+      dk(widget.day),
+      CalendarEvent(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        type: _type!,
+        note: _noteCtrl.text.trim(),
+        time: _timeStr,
+      ),
+    );
+    widget.onChanged();
+    if (mounted) Navigator.pop(context);
   }
 
   @override
   Widget build(BuildContext context) {
-    final isRu = widget.isRu;
-    final bg  = widget.isDark ? const Color(0xFF12123A) : Colors.white;
-    final txt = widget.isDark ? Colors.white : const Color(0xFF1A3A5C);
-    final acc = widget.isDark ? const Color(0xFF7C4DFF) : const Color(0xFF2196F3);
-    final sub = widget.isDark ? Colors.white54 : const Color(0xFF1A3A5C).withOpacity(0.45);
+    final bg = dark ? const Color(0xFF252840) : Colors.white;
+    final txt = dark ? Colors.white : const Color(0xFF1A1D2E);
+    final existing = s.getEvents(dk(widget.day));
+    final canAdd = existing.length < 3;
 
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
       child: Container(
-        decoration: BoxDecoration(color: bg,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-            boxShadow: [BoxShadow(color: acc.withOpacity(0.2), blurRadius: 28)]),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Column(mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Center(child: Container(width: 40, height: 4,
-                    margin: const EdgeInsets.only(bottom: 16),
-                    decoration: BoxDecoration(color: sub, borderRadius: BorderRadius.circular(2)))),
-                Text('${_monthName(widget.month, isRu)}, ${widget.day}',
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: txt)),
-                const SizedBox(height: 3),
-                Text('${widget.year}', style: TextStyle(color: sub, fontSize: 13)),
-                const SizedBox(height: 20),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _handle(),
+            const SizedBox(height: 12),
+            Text(ru ? 'Добавить событие' : 'Add Event',
+                style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: txt)),
+            const SizedBox(height: 16),
 
-                if (_list.isNotEmpty) ...[
-                  Text(_t('События', 'Events', isRu),
-                      style: TextStyle(color: sub, fontSize: 12, fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 8),
-                  ..._list.map((e) => _EvTile(ev: e, isDark: widget.isDark, isRu: isRu,
-                      onDel: () => setState(() => _list.removeWhere((x) => x.type == e.type)))),
-                  const SizedBox(height: 16),
-                ],
-
-                Text(_t('Добавить', 'Add', isRu),
-                    style: TextStyle(color: sub, fontSize: 12, fontWeight: FontWeight.bold)),
-                const SizedBox(height: 10),
-                Wrap(spacing: 8, runSpacing: 8, children: EventType.values.map((t) {
-                  final sel = _pick == t;
-                  final has = _list.any((e) => e.type == t);
+            if (!canAdd) ...[
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: Colors.orange.withOpacity(0.3)),
+                ),
+                child: Text(
+                  ru ? '⚠️ Максимум 3 события на день' : '⚠️ Max 3 events per day',
+                  style: const TextStyle(color: Colors.orange, fontWeight: FontWeight.w600),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.pop(context),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF5A8FDB),
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)),
+                  ),
+                  child: Text(ru ? 'Понятно' : 'Got it',
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                ),
+              ),
+            ] else ...[
+              // Type selector
+              GridView.count(
+                crossAxisCount: 2,
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                mainAxisSpacing: 8,
+                crossAxisSpacing: 8,
+                childAspectRatio: 3.4,
+                children: EventType.values.map((t) {
+                  final sel = _type == t;
                   return GestureDetector(
-                    onTap: has ? null : () => setState(() {
-                      _pick = sel ? null : t; _ctrl.clear();
-                    }),
+                    onTap: () => setState(() => _type = t),
                     child: AnimatedContainer(
-                      duration: const Duration(milliseconds: 200),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      duration: const Duration(milliseconds: 150),
                       decoration: BoxDecoration(
-                        color: sel ? t.color : t.color.withOpacity(0.12),
+                        color: sel
+                            ? t.color.withOpacity(0.18)
+                            : (dark ? Colors.white.withOpacity(0.06) : Colors.grey.withOpacity(0.07)),
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: has
-                            ? Colors.grey.withOpacity(0.3) : t.color.withOpacity(0.5)),
+                        border: Border.all(color: sel ? t.color : Colors.transparent, width: 1.5),
                       ),
-                      child: Row(mainAxisSize: MainAxisSize.min, children: [
-                        Text(t.emoji, style: const TextStyle(fontSize: 14)),
-                        const SizedBox(width: 6),
-                        Text(t.label(isRu), style: TextStyle(fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: sel ? Colors.white : has ? Colors.grey : txt)),
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      child: Row(children: [
+                        Text(t.emoji, style: const TextStyle(fontSize: 17)),
+                        const SizedBox(width: 7),
+                        Expanded(
+                          child: Text(t.label(ru),
+                              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600,
+                                  color: sel ? t.color : (dark ? Colors.white70 : const Color(0xFF4A4E69))),
+                              overflow: TextOverflow.ellipsis),
+                        ),
                       ]),
                     ),
                   );
-                }).toList()),
+                }).toList(),
+              ),
+              const SizedBox(height: 12),
 
-                if (_pick != null) ...[
-                  const SizedBox(height: 14),
-                  TextField(controller: _ctrl, autofocus: true, style: TextStyle(color: txt),
-                      decoration: InputDecoration(
-                        hintText: _t('Заметка (необязательно)', 'Note (optional)', isRu),
-                        hintStyle: TextStyle(color: sub),
-                        filled: true, fillColor: acc.withOpacity(0.07),
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide.none),
-                        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12),
-                            borderSide: BorderSide(color: acc, width: 1.5)),
-                      )),
-                  const SizedBox(height: 12),
-                  SizedBox(width: double.infinity, child: ElevatedButton(
-                    onPressed: _add,
-                    style: ElevatedButton.styleFrom(backgroundColor: _pick!.color,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        padding: const EdgeInsets.symmetric(vertical: 14)),
-                    child: Text(
-                      '${_t('Добавить', 'Add', isRu)} ${_pick!.emoji}',
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                    ),
-                  )),
-                ],
-                const SizedBox(height: 20),
-                Row(children: [
-                  Expanded(child: OutlinedButton(
+              // Time
+              GestureDetector(
+                onTap: _pickTime,
+                child: _timePicker(txt),
+              ),
+              const SizedBox(height: 10),
+
+              // Note
+              TextField(
+                controller: _noteCtrl,
+                maxLines: 2,
+                style: TextStyle(fontSize: 13, color: txt),
+                decoration: _inputDec(ru ? 'Заметка — место, детали...' : 'Note — place, details...', dark),
+              ),
+              const SizedBox(height: 16),
+
+              Row(children: [
+                Expanded(
+                  child: OutlinedButton(
                     onPressed: () => Navigator.pop(context),
-                    style: OutlinedButton.styleFrom(foregroundColor: sub,
-                        side: BorderSide(color: sub.withOpacity(0.4)),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        padding: const EdgeInsets.symmetric(vertical: 14)),
-                    child: Text(_t('Закрыть', 'Close', isRu)),
-                  )),
-                  const SizedBox(width: 12),
-                  Expanded(flex: 2, child: ElevatedButton(
-                    onPressed: () { widget.onSave(_list); Navigator.pop(context); },
-                    style: ElevatedButton.styleFrom(backgroundColor: acc,
-                        foregroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                        padding: const EdgeInsets.symmetric(vertical: 14), elevation: 4),
-                    child: Text(_t('Сохранить ✓', 'Save ✓', isRu),
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                  )),
-                ]),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)),
+                      side: BorderSide(color: Colors.grey.withOpacity(0.3)),
+                    ),
+                    child: Text(ru ? 'Отмена' : 'Cancel',
+                        style: TextStyle(color: txt.withOpacity(0.5))),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: _type != null ? _save : null,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF5A8FDB),
+                      disabledBackgroundColor: const Color(0xFF5A8FDB).withOpacity(0.3),
+                      padding: const EdgeInsets.symmetric(vertical: 13),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)),
+                    ),
+                    child: Text(ru ? 'Добавить' : 'Add',
+                        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                  ),
+                ),
               ]),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _timePicker(Color txt) {
+    final hasTime = _time != null;
+    const blue = Color(0xFF5A8FDB);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: dark ? Colors.white.withOpacity(0.06) : Colors.grey.withOpacity(0.07),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: hasTime ? blue.withOpacity(0.5) : Colors.transparent, width: 1.5),
+      ),
+      child: Row(children: [
+        Icon(Icons.access_time_rounded, size: 18,
+            color: hasTime ? blue : (dark ? Colors.white38 : Colors.grey)),
+        const SizedBox(width: 10),
+        Text(
+          hasTime ? _timeStr : (ru ? 'Время (необязательно)' : 'Time (optional)'),
+          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
+              color: hasTime ? blue : (dark ? Colors.white38 : Colors.grey)),
+        ),
+        const Spacer(),
+        if (hasTime)
+          GestureDetector(
+            onTap: () => setState(() => _time = null),
+            child: Icon(Icons.close, size: 16, color: Colors.grey.withOpacity(0.6)),
+          ),
+      ]),
+    );
+  }
+}
+
+// ─── Edit Event Sheet ─────────────────────────────────────────────────────────
+
+class _EditSheet extends StatefulWidget {
+  final DateTime day;
+  final CalendarEvent event;
+  final AppState st;
+  final void Function(CalendarEvent) onSave;
+  final VoidCallback onDelete;
+
+  const _EditSheet({required this.day, required this.event, required this.st,
+    required this.onSave, required this.onDelete});
+  @override
+  State<_EditSheet> createState() => _EditSheetState();
+}
+
+class _EditSheetState extends State<_EditSheet> {
+  late TextEditingController _noteCtrl;
+  TimeOfDay? _time;
+
+  @override
+  void initState() {
+    super.initState();
+    _noteCtrl = TextEditingController(text: widget.event.note);
+    final t = widget.event.time;
+    if (t.isNotEmpty) {
+      final parts = t.split(':');
+      if (parts.length == 2) {
+        _time = TimeOfDay(hour: int.parse(parts[0]), minute: int.parse(parts[1]));
+      }
+    }
+  }
+
+  @override
+  void dispose() { _noteCtrl.dispose(); super.dispose(); }
+
+  bool get ru => widget.st.isRu;
+  bool get dark => widget.st.isDark;
+  Color get c => widget.event.type.color;
+
+  String get _timeStr => _time != null
+      ? '${_time!.hour.toString().padLeft(2, '0')}:${_time!.minute.toString().padLeft(2, '0')}'
+      : '';
+
+  Future<void> _pickTime() async {
+    final t = await showTimePicker(
+      context: context,
+      initialTime: _time ?? TimeOfDay.now(),
+      builder: (ctx, child) => MediaQuery(
+        data: MediaQuery.of(ctx).copyWith(alwaysUse24HourFormat: true),
+        child: child!,
+      ),
+    );
+    if (t != null) setState(() => _time = t);
+  }
+
+  void _save() {
+    widget.onSave(widget.event.copyWith(note: _noteCtrl.text.trim(), time: _timeStr));
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = dark ? const Color(0xFF252840) : Colors.white;
+    final txt = dark ? Colors.white : const Color(0xFF1A1D2E);
+
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: Container(
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _handle(),
+            const SizedBox(height: 12),
+            Row(children: [
+              Text(widget.event.type.emoji, style: const TextStyle(fontSize: 22)),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '${ru ? 'Редактировать' : 'Edit'}: ${widget.event.type.label(ru)}',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700, color: txt),
+                ),
+              ),
+              IconButton(
+                onPressed: () async {
+                  final ok = await showDialog<bool>(
+                    context: context,
+                    builder: (_) => _ConfirmDelete(event: widget.event, ru: ru, dark: dark),
+                  );
+                  if (ok == true && mounted) {
+                    Navigator.pop(context);
+                    widget.onDelete();
+                  }
+                },
+                icon: const Icon(Icons.delete_outline, color: Colors.red),
+              ),
+            ]),
+            const SizedBox(height: 14),
+
+            // Time
+            GestureDetector(
+              onTap: _pickTime,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                decoration: BoxDecoration(
+                  color: dark ? Colors.white.withOpacity(0.06) : Colors.grey.withOpacity(0.07),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: _time != null ? c.withOpacity(0.5) : Colors.transparent, width: 1.5),
+                ),
+                child: Row(children: [
+                  Icon(Icons.access_time_rounded, size: 18,
+                      color: _time != null ? c : (dark ? Colors.white38 : Colors.grey)),
+                  const SizedBox(width: 10),
+                  Text(
+                    _time != null ? _timeStr : (ru ? 'Выбрать время' : 'Pick time'),
+                    style: TextStyle(fontSize: 13, fontWeight: FontWeight.w500,
+                        color: _time != null ? c : (dark ? Colors.white38 : Colors.grey)),
+                  ),
+                  const Spacer(),
+                  if (_time != null)
+                    GestureDetector(
+                      onTap: () => setState(() => _time = null),
+                      child: Icon(Icons.close, size: 16, color: Colors.grey.withOpacity(0.6)),
+                    ),
+                ]),
+              ),
+            ),
+            const SizedBox(height: 10),
+
+            // Note
+            TextField(
+              controller: _noteCtrl,
+              maxLines: 3,
+              style: TextStyle(fontSize: 13, color: txt),
+              decoration: _inputDec(ru ? 'Заметка, место, детали...' : 'Note, place, details...', dark)
+                  .copyWith(
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  borderSide: BorderSide(color: c, width: 1.5),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            Row(children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => Navigator.pop(context),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)),
+                    side: BorderSide(color: Colors.grey.withOpacity(0.3)),
+                  ),
+                  child: Text(ru ? 'Отмена' : 'Cancel',
+                      style: TextStyle(color: txt.withOpacity(0.5))),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: _save,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: c,
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(13)),
+                  ),
+                  child: Text(ru ? 'Сохранить' : 'Save',
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                ),
+              ),
+            ]),
+          ],
         ),
       ),
     );
   }
 }
 
-class _EvTile extends StatelessWidget {
-  final DayEvent ev; final bool isDark, isRu; final VoidCallback onDel;
-  const _EvTile({required this.ev, required this.isDark,
-    required this.isRu, required this.onDel});
+// ─── Shared helpers ───────────────────────────────────────────────────────────
+
+Widget _handle() => Container(
+  width: 40, height: 4,
+  decoration: BoxDecoration(color: Colors.grey.withOpacity(0.3), borderRadius: BorderRadius.circular(2)),
+);
+
+InputDecoration _inputDec(String hint, bool dark) => InputDecoration(
+  hintText: hint,
+  hintStyle: TextStyle(color: dark ? Colors.white38 : Colors.grey, fontSize: 13),
+  filled: true,
+  fillColor: dark ? Colors.white.withOpacity(0.06) : Colors.grey.withOpacity(0.07),
+  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide.none),
+  focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(12),
+      borderSide: const BorderSide(color: Color(0xFF5A8FDB), width: 1.5)),
+  contentPadding: const EdgeInsets.all(12),
+);
+
+// ─── Menu & Nav ───────────────────────────────────────────────────────────────
+
+class _MenuBtn extends StatelessWidget {
+  final AppState st;
+  const _MenuBtn({required this.st});
+
   @override
   Widget build(BuildContext context) {
-    final txt = isDark ? Colors.white : const Color(0xFF1A3A5C);
-    return Container(
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(color: ev.type.color.withOpacity(isDark ? 0.18 : 0.1),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: ev.type.color.withOpacity(0.35))),
-      child: Row(children: [
-        Text(ev.type.emoji, style: const TextStyle(fontSize: 18)),
-        const SizedBox(width: 10),
-        Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(ev.type.label(isRu),
-              style: TextStyle(color: txt, fontWeight: FontWeight.bold, fontSize: 13)),
-          if (ev.note.isNotEmpty)
-            Text(ev.note, style: TextStyle(color: txt.withOpacity(0.6), fontSize: 12)),
-        ])),
-        GestureDetector(onTap: onDel,
-            child: Icon(Icons.delete_outline_rounded,
-                color: Colors.red.withOpacity(0.6), size: 20)),
-      ]),
+    final dark = st.isDark;
+    final ru = st.isRu;
+    return PopupMenuButton<String>(
+      icon: Icon(Icons.more_vert_rounded,
+          color: dark ? Colors.white70 : const Color(0xFF4A4E69)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      color: dark ? const Color(0xFF2E3250) : Colors.white,
+      elevation: 8,
+      onSelected: (v) async {
+        if (v == 'theme') await st.toggleTheme();
+        if (v == 'lang') await st.toggleLanguage();
+      },
+      itemBuilder: (_) => [
+        PopupMenuItem(
+          value: 'theme',
+          child: Row(children: [
+            Icon(dark ? Icons.light_mode_rounded : Icons.dark_mode_rounded,
+                color: dark ? Colors.amber : const Color(0xFF5A8FDB), size: 20),
+            const SizedBox(width: 10),
+            Text(dark ? (ru ? 'Светлая тема' : 'Light') : (ru ? 'Тёмная тема' : 'Dark'),
+                style: TextStyle(
+                    color: dark ? Colors.white : const Color(0xFF1A1D2E),
+                    fontWeight: FontWeight.w500)),
+          ]),
+        ),
+        PopupMenuItem(
+          value: 'lang',
+          child: Row(children: [
+            Text(ru ? '🇬🇧' : '🇷🇺', style: const TextStyle(fontSize: 18)),
+            const SizedBox(width: 10),
+            Text(ru ? 'English' : 'Русский',
+                style: TextStyle(
+                    color: dark ? Colors.white : const Color(0xFF1A1D2E),
+                    fontWeight: FontWeight.w500)),
+          ]),
+        ),
+      ],
     );
   }
 }
 
-//  DAY BACKGROUND
-class _DayBg extends StatefulWidget {
-  const _DayBg();
-  @override
-  State<_DayBg> createState() => _DayBgState();
-}
-
-class _DayBgState extends State<_DayBg> with SingleTickerProviderStateMixin {
-  late AnimationController _ctrl;
-  late Animation<double> _anim;
-  @override
-  void initState() {
-    super.initState();
-    _ctrl = AnimationController(vsync: this, duration: const Duration(seconds: 8))..repeat(reverse: true);
-    _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut);
-  }
-  @override
-  void dispose() { _ctrl.dispose(); super.dispose(); }
-  @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-    animation: _anim,
-    builder: (_, __) => Container(
-      decoration: BoxDecoration(gradient: LinearGradient(
-        begin: Alignment.topCenter, end: Alignment.bottomCenter,
-        colors: [
-          Color.lerp(const Color(0xFF42A5F5), const Color(0xFF1E88E5), _anim.value)!,
-          Color.lerp(const Color(0xFF90CAF9), const Color(0xFFBBDEFB), _anim.value)!,
-          Color.lerp(const Color(0xFFE3F2FD), const Color(0xFFF5F9FF), _anim.value)!,
-        ],
-      )),
-      child: CustomPaint(painter: _SkyPainter(_anim.value)),
-    ),
-  );
-}
-
-class _SkyPainter extends CustomPainter {
-  final double t;
-  _SkyPainter(this.t);
-
-  void _cloud(Canvas c, double cx, double cy, double sc) {
-    final p = Paint()..style = PaintingStyle.fill..color = Colors.white.withOpacity(0.72);
-    c.drawCircle(Offset(cx, cy), 22*sc, p);
-    c.drawCircle(Offset(cx+25*sc, cy+5*sc), 16*sc, p);
-    c.drawCircle(Offset(cx-18*sc, cy+6*sc), 14*sc, p);
-    c.drawCircle(Offset(cx+9*sc, cy+11*sc), 18*sc, p);
-    c.drawCircle(Offset(cx-6*sc, cy+11*sc), 16*sc, p);
-  }
-
-  @override
-  void paint(Canvas c, Size s) {
-    c.drawCircle(Offset(s.width*0.8, s.height*0.07), 55,
-        Paint()..style = PaintingStyle.fill
-          ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 35)
-          ..color = Colors.yellow.withOpacity(0.25));
-    c.drawCircle(Offset(s.width*0.8, s.height*0.07), 24,
-        Paint()..color = Colors.yellow.withOpacity(0.9));
-    final rays = Paint()..style = PaintingStyle.stroke
-      ..strokeWidth = 2.2..color = Colors.yellow.withOpacity(0.4);
-    for (int i = 0; i < 8; i++) {
-      final a = i*pi/4 + t*0.4;
-      c.drawLine(Offset(s.width*0.8+cos(a)*28, s.height*0.07+sin(a)*28),
-          Offset(s.width*0.8+cos(a)*40, s.height*0.07+sin(a)*40), rays);
-    }
-    _cloud(c, s.width*(0.1 + t*0.06), s.height*0.15, 0.9);
-    _cloud(c, s.width*(0.55 - t*0.05), s.height*0.09, 1.1);
-    _cloud(c, s.width*(0.28 + t*0.04), s.height*0.24, 0.7);
-  }
-
-  @override
-  bool shouldRepaint(_SkyPainter o) => o.t != t;
-}
-
-//  NIGHT BACKGROUND
-class _NightBg extends StatefulWidget {
-  const _NightBg();
-  @override
-  State<_NightBg> createState() => _NightBgState();
-}
-
-class _NightBgState extends State<_NightBg> with SingleTickerProviderStateMixin {
-  late AnimationController _ctrl;
-  late Animation<double> _anim;
-  late List<_Star> _stars;
-
-  @override
-  void initState() {
-    super.initState();
-    final rnd = Random(42);
-    _stars = List.generate(90, (_) => _Star(
-        x: rnd.nextDouble(), y: rnd.nextDouble(),
-        r: rnd.nextDouble()*1.8+0.4, phase: rnd.nextDouble()*2*pi));
-    _ctrl = AnimationController(vsync: this, duration: const Duration(seconds: 3))..repeat(reverse: true);
-    _anim = CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut);
-  }
-
-  @override
-  void dispose() { _ctrl.dispose(); super.dispose(); }
-
-  @override
-  Widget build(BuildContext context) => AnimatedBuilder(
-    animation: _anim,
-    builder: (_, __) => Container(
-      decoration: const BoxDecoration(gradient: LinearGradient(
-        begin: Alignment.topCenter, end: Alignment.bottomCenter,
-        colors: [Color(0xFF0D0D2B), Color(0xFF1A1040), Color(0xFF0D0D2B)],
-      )),
-      child: CustomPaint(painter: _StarPainter(_stars, _anim.value)),
-    ),
-  );
-}
-
-class _Star {
-  final double x,y,r,phase;
-  const _Star({required this.x, required this.y, required this.r, required this.phase});
-}
-
-class _StarPainter extends CustomPainter {
-  final List<_Star> stars; final double t;
-  _StarPainter(this.stars, this.t);
-  @override
-  void paint(Canvas c, Size s) {
-    final p = Paint()..style = PaintingStyle.fill;
-    for (final st in stars) {
-      final tw = sin(st.phase + t*pi)*0.5+0.5;
-      p.color = Colors.white.withOpacity(0.25+tw*0.65);
-      c.drawCircle(Offset(st.x*s.width, st.y*s.height), st.r, p);
-    }
-    c.drawCircle(Offset(s.width*0.82, s.height*0.07), 60,
-        Paint()..maskFilter=const MaskFilter.blur(BlurStyle.normal,30)
-          ..color=const Color(0xFF7C4DFF).withOpacity(0.15));
-    c.drawCircle(Offset(s.width*0.82, s.height*0.07), 22,
-        Paint()..color=const Color(0xFFEEEAFF));
-    c.drawCircle(Offset(s.width*0.87, s.height*0.065), 17,
-        Paint()..color=const Color(0xFF1A1040));
-    c.drawLine(Offset(s.width*0.3+t*40, s.height*0.12),
-        Offset(s.width*0.3+t*40+55, s.height*0.12+14),
-        Paint()..style=PaintingStyle.stroke..strokeWidth=1.5..strokeCap=StrokeCap.round
-          ..color=Colors.white.withOpacity(t*0.5));
-  }
-  @override
-  bool shouldRepaint(_StarPainter o) => o.t != t;
-}
-
-//  CONFETTI LAYER
-class _ConfettiLayer extends StatefulWidget {
-  final VoidCallback onDismiss;
-  const _ConfettiLayer({required this.onDismiss});
-  @override
-  State<_ConfettiLayer> createState() => _ConfettiLayerState();
-}
-
-class _ConfettiLayerState extends State<_ConfettiLayer> with SingleTickerProviderStateMixin {
-  late AnimationController _ctrl;
-  late List<_Piece> _pieces;
-
-  static const _cols = [
-    Color(0xFFFF5252), Color(0xFFFFD740), Color(0xFF69F0AE),
-    Color(0xFF40C4FF), Color(0xFFFF4081), Color(0xFFE040FB),
-    Color(0xFFFFAB40), Color(0xFFB2FF59),
-  ];
-
-  @override
-  void initState() {
-    super.initState();
-    final rnd = Random();
-    _pieces = List.generate(110, (_) => _Piece(
-      x: rnd.nextDouble(), size: rnd.nextDouble()*12+5,
-      color: _cols[rnd.nextInt(_cols.length)],
-      spin: rnd.nextDouble()*2*pi, spinSpd: (rnd.nextDouble()-.5)*5,
-      drift: (rnd.nextDouble()-.5)*0.12, delay: rnd.nextDouble()*0.5,
-    ));
-    _ctrl = AnimationController(vsync: this, duration: const Duration(seconds: 5))..repeat();
-    Future.delayed(const Duration(seconds: 7), () { if (mounted) widget.onDismiss(); });
-  }
-
-  @override
-  void dispose() { _ctrl.dispose(); super.dispose(); }
+class _Arrow extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  final bool dark;
+  const _Arrow({required this.icon, required this.onTap, required this.dark});
 
   @override
   Widget build(BuildContext context) => GestureDetector(
-    onTap: widget.onDismiss,
-    child: AnimatedBuilder(
-      animation: _ctrl,
-      builder: (_, __) => CustomPaint(
-        painter: _ConfettiPainter(_pieces, _ctrl.value),
-        child: Container(color: Colors.transparent),
+    onTap: onTap,
+    child: Container(
+      width: 34, height: 34,
+      decoration: BoxDecoration(
+        color: dark ? Colors.white.withOpacity(0.08) : Colors.black.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(10),
       ),
+      child: Icon(icon, size: 20, color: dark ? Colors.white70 : const Color(0xFF4A4E69)),
     ),
   );
-}
-
-class _Piece {
-  final double x, size, spin, spinSpd, drift, delay; final Color color;
-  const _Piece({required this.x, required this.size, required this.color,
-    required this.spin, required this.spinSpd, required this.drift, required this.delay});
-}
-
-class _ConfettiPainter extends CustomPainter {
-  final List<_Piece> pieces; final double t;
-  _ConfettiPainter(this.pieces, this.t);
-  @override
-  void paint(Canvas c, Size s) {
-    final p = Paint()..style = PaintingStyle.fill;
-    for (final pc in pieces) {
-      final prog = ((t - pc.delay) % 1.0 + 1.0) % 1.0;
-      final y = prog*(s.height+40) - 20;
-      final x = pc.x*s.width + sin(prog*pi*3 + pc.drift*10)*38;
-      p.color = pc.color.withOpacity(prog < 0.8 ? 1.0 : (1.0-prog)*5);
-      c.save();
-      c.translate(x, y);
-      c.rotate(pc.spin + prog*pc.spinSpd*10);
-      c.drawRRect(RRect.fromRectAndRadius(
-          Rect.fromCenter(center: Offset.zero, width: pc.size, height: pc.size*0.5),
-          const Radius.circular(2)), p);
-      c.restore();
-    }
-  }
-  @override
-  bool shouldRepaint(_ConfettiPainter o) => o.t != t;
 }
