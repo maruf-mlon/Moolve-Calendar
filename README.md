@@ -1,5 +1,5 @@
-### ​Moolve Calendar 🚀
-​Moolve Calendar is my first serious project, built as a foundation for the upcoming Moolve ecosystem. It’s a calendar app where I focused on style, speed, and rock-solid stability.
+### ​Moolvy Calendar 🚀
+​Moolvy Calendar is my first serious project, built as a foundation for the upcoming Moolve ecosystem. It’s a calendar app where I focused on style, speed, and rock-solid stability.
 
 
 ### ​🛠 About the Project
